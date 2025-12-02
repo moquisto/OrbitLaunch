@@ -9,3 +9,39 @@ resistance. Location will naturally be tested - can see how the earths rotation 
 
 If we get this working we could start to consider how trajectories would look like for payload dropoffs. Launching a payload into orbit (for example a satellite) and for the booster rocket to reach
 the ground again.
+
+
+
+
+
+
+# IDEALISATION 
+cirular orbits 
+orbits must go accross the earth 
+modelling the rocket as a dot (no ordientation of the rocket, no rotation of the rocket)
+perfect control 
+circular earth
+
+
+
+
+
+# PARTS
+athmosphere 
+time varying mass 
+thrust direction and magnitude 
+earth rotation (momentum)
+varying height of orbit 
+varying launch site on the earth
+model of the rocket (BFR SpaceX)
+numerical integrator (verlet?, rk4?)
+varying payoad mass
+
+
+
+
+# Notes
+Spherical coordinates 
+3D
+
+
