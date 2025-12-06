@@ -7,6 +7,10 @@ from mpl_toolkits.mplot3d import Axes3D
 
 G = 6.67430e-11  # gravitational constant
 M_earth = 5.972e24 # earth mass
+omega_earth = 7.2921159e-5   # rad/s (Earth rotation rate)
+
+omega_vec = np.array([0.0, 0.0, omega_earth])  # rotation about +z (Earth convention)
+
 
 #info
 
@@ -28,12 +32,26 @@ M_earth = 5.972e24 # earth mass
 
 
 
+# 2 ways to add, one is way simpler. Either make earth rotate by adding a
+# a rotational frame, or just add a tangential velocity if the initial position
+# is at the earths surface. Meaning that we compute the sum of the xyz
+# components and if they sum up to the earths radius, then we add a tangential
+# velocity component based on the earths rotation. 
+
+
+
 
 
 def gravitational_acceleration(pos):
     """Return the gravitational acceleration vector at position pos."""
     r = np.linalg.norm(pos) # returns absolute distance from origin.
     return -G * M_earth * pos / r**3
+
+def launch_site_rotational_velocity(pos_launch, omega_vec=omega_vec):
+    # v = Omega x r
+    return np.cross(omega_vec, pos_launch)  #cross product
+
+
 
 
 def velocity_verlet_step(pos, vel, dt):
@@ -102,17 +120,43 @@ def animate_orbit(positions, interval=10):
 
 if __name__ == "__main__":
 
-    # Satellite parameters (adjust freely)
-    #around 99 mins for nasas low earth orbit satellite to cycle
-    #99*60 = 6000-60 = 5940 seconds - this one should orbit at least once or twice
+    # choose launch latitude (deg) and altitude (m)
+    lat_deg = 0.0               # 0 = equator, 90 = north pole
+    altitude = 0.0              # altitude above Earth's surface
+    R_earth = 6371000.0         # meters (approx)
     m = 1000  # satellite mass [kg]
-  
-    pos0 = np.array([7e6, 0, 0])       # 7000 km from Earth center
-    vel0 = np.array([0, 7500, 0])      # roughly LEO orbital speed
+
+    # compute initial position in ECEF-like coordinates (simple)
+    lat = np.deg2rad(lat_deg)
+    # place launch on prime meridian for simplicity: longitude = 0
+    x = (R_earth + altitude) * np.cos(lat)
+    y = 0.0
+    z = (R_earth + altitude) * np.sin(lat)
+    pos0 = np.array([x, y, z])
+
+    # base launch velocity you impart relative to ground (e.g. pointing eastward)
+    # Example: initial burn gives 9500 m/s in local east direction (you choose)
+    # Here we create a local East unit vector (for lon=0):
+    east = np.array([ -np.sin(0.0), np.cos(0.0), 0.0 ])  # lon=0 -> east points +y
+    
+    burn_speed = 9500.0    # m/s (example)
+    vel_rel_ground = burn_speed * east
+
+    # add Earth's rotation velocity at the launch site
+    v_rot = launch_site_rotational_velocity(pos0)   # Omega x r
+
+    # inertial initial velocity = ground-relative burn + rotation velocity
+    vel0_inertial = vel_rel_ground + v_rot
+
+    print("launch lat:", lat_deg, "deg")
+    print("v_rot (m/s):", v_rot)
+    print("initial inertial speed (m/s):", np.linalg.norm(vel0_inertial))
+
 
     dt = 1.0
     steps = 20000
 
-    positions, velocities = simulate_orbit(pos0, vel0, m, dt, steps)
+    positions, velocities = simulate_orbit(pos0, vel0_inertial, m, dt, steps)
 
     animate_orbit(positions)
+
