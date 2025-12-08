@@ -1,16 +1,16 @@
 # OrbitLaunch
 
-Object-oriented 3D simulation of a two-stage rocket (BFR-inspired) launching from Earth to a target circular orbit. The goal is to search for a guidance profile that reaches a stable orbit at a chosen altitude while minimizing fuel consumption.
+Object-oriented 3D simulation skeleton of a two-stage rocket (BFR-inspired) launching from Earth to a target circular orbit. The goal is to search for a guidance profile that reaches a stable orbit at a chosen altitude while minimizing fuel consumption. The current code provides interfaces/placeholders only (no working physics yet).
 
 If you later draw a 2D cross-section of the orbit, the circular path will appear to pass through Earth's center because the orbital plane passes through the center; the orbit itself is always above the surface.
 
 ## Current structure
-- atmosphere.py: US Standard Atmosphere 1976 + NRLMSIS 2.1 placeholders combined by altitude.
-- gravity.py: Earth parameters, central gravity, and atmosphere co-rotation velocity.
-- aerodynamics.py: Drag-only aerodynamics with a Cd model and reference area query.
-- rocket.py: Engine, Stage, and Rocket classes (mass, thrust, staging hooks).
-- integrators.py: State dataclass plus RK4 integrator.
-- simulation.py: Guidance stub, control command, logger, derivatives, and main loop.
+- atmosphere.py: interfaces for US Standard Atmosphere 1976, NRLMSIS 2.1, and a combined dispatcher.
+- gravity.py: Earth model data and method placeholders for central gravity and co-rotation velocity.
+- aerodynamics.py: Drag-only aerodynamics interface (Cd model + drag force).
+- rocket.py: Engine, Stage, and Rocket class outlines (thrust, mass, staging hooks).
+- integrators.py: State dataclass plus RK4 integrator interface.
+- simulation.py: Guidance stub, control command, logger, derivatives, and main loop outlines.
 
 ## Simplifications (v1)
 

@@ -1,5 +1,6 @@
 """
-Simulation glue code: guidance, events, logging, and integration loop.
+Simulation glue outline: guidance, events, logging, and integration loop.
+Behavior is left unimplemented to serve as a structural template.
 """
 
 from __future__ import annotations
@@ -32,18 +33,11 @@ class Guidance:
         pitch_program: Optional[Callable[[float, State], np.ndarray]] = None,
         throttle_schedule: Optional[Callable[[float, State], float]] = None,
     ):
-        self.pitch_program = pitch_program or (lambda t, state: np.array([1.0, 0.0, 0.0]))
-        self.throttle_schedule = throttle_schedule or (lambda t, state: 1.0)
+        self.pitch_program = pitch_program
+        self.throttle_schedule = throttle_schedule
 
     def compute_command(self, t: float, state: State) -> ControlCommand:
-        direction = np.array(self.pitch_program(t, state), dtype=float)
-        norm = np.linalg.norm(direction)
-        if norm == 0.0:
-            direction = np.array([1.0, 0.0, 0.0])
-            norm = 1.0
-        direction_unit = direction / norm
-        throttle = float(self.throttle_schedule(t, state))
-        return ControlCommand(throttle=max(0.0, min(1.0, throttle)), thrust_direction=direction_unit)
+        raise NotImplementedError("Implement guidance law")
 
 
 class Logger:
@@ -59,11 +53,7 @@ class Logger:
         self.stage = []
 
     def record(self, t: float, state: State):
-        self.t.append(float(t))
-        self.r.append(state.r_eci.copy())
-        self.v.append(state.v_eci.copy())
-        self.m.append(float(state.m))
-        self.stage.append(int(state.stage_index))
+        raise NotImplementedError("Implement logging behavior")
 
 
 class Simulation:
@@ -84,44 +74,7 @@ class Simulation:
         self.guidance = guidance or Guidance()
 
     def _derivatives(self, t: float, state: State, control: ControlCommand):
-        r = state.r_eci
-        v = state.v_eci
-        mass = max(state.m, 1e-6)  # avoid divide-by-zero
-
-        a_grav = self.earth.gravity_accel(r)
-
-        altitude = np.linalg.norm(r) - self.earth.radius
-        props = self.atmosphere.properties(altitude, t)
-        p_amb = props.get("p", 0.0)
-
-        F_drag = self.aero.drag_force(state, self.rocket, self.earth, t)
-        F_thrust, mdot = self.rocket.thrust_and_mass_flow(control, state, p_amb)
-
-        a_drag = F_drag / mass
-        a_thrust = F_thrust / mass
-
-        drdt = v
-        dvdt = a_grav + a_drag + a_thrust
-        dmdt = mdot
-
-        return drdt, dvdt, dmdt
+        raise NotImplementedError("Implement equations of motion")
 
     def run(self, t0: float, tf: float, dt: float, state0: State) -> Logger:
-        """
-        Execute the time-marching simulation and return a trajectory log.
-        Stage separation and other events can be inserted in the loop later.
-        """
-        logger = Logger()
-        t = t0
-        state = state0
-
-        while t <= tf:
-            logger.record(t, state)
-
-            control = self.guidance.compute_command(t, state)
-            deriv_fn = lambda tau, s: self._derivatives(tau, s, control)
-            state = self.integrator.step(deriv_fn, state, t, dt)
-
-            t += dt
-
-        return logger
+        raise NotImplementedError("Implement main simulation loop")
