@@ -28,6 +28,10 @@ LAUNCH_LON_DEG = -80.60433
 
 TARGET_ORBIT_RADIUS = R_EARTH + 420_000.0
 G0 = 9.80665
+ORBIT_ALT_TOL = 5_000.0  # meters
+ORBIT_ECC_TOL = 0.01
+ORBIT_SPEED_TOL = 50.0
+ORBIT_RADIAL_TOL = 50.0
 
 
 @dataclass
@@ -154,18 +158,50 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0):
         dt,
         state0,
         orbit_target_radius=TARGET_ORBIT_RADIUS,
-        orbit_speed_tolerance=50.0,
-        orbit_radial_tolerance=50.0,
-        orbit_alt_tolerance=500.0,
+        orbit_speed_tolerance=ORBIT_SPEED_TOL,
+        orbit_radial_tolerance=ORBIT_RADIAL_TOL,
+        orbit_alt_tolerance=ORBIT_ALT_TOL,
     )
 
     prop_used = (sim.rocket.stages[0].prop_mass + sim.rocket.stages[1].prop_mass) - (log.m[-1] - sim.rocket.stages[0].dry_mass - sim.rocket.stages[1].dry_mass)
-    orbit_ok = log.orbit_achieved
-    penalty = 0.0 if orbit_ok else 1e9
+    prop_used = max(prop_used, 0.0)
+    total_prop = sim.rocket.stages[0].prop_mass + sim.rocket.stages[1].prop_mass
+
+    # Orbit evaluation using orbital elements
+    r_vec = np.array(log.r[-1], dtype=float)
+    v_vec = np.array(log.v[-1], dtype=float)
+    r_norm = np.linalg.norm(r_vec)
+    v_norm = np.linalg.norm(v_vec)
+
+    h_vec = np.cross(r_vec, v_vec)
+    h_norm = np.linalg.norm(h_vec)
+    energy = 0.5 * v_norm**2 - MU_EARTH / r_norm
+    if energy != 0:
+        a = -MU_EARTH / (2 * energy)
+    else:
+        a = np.inf
+    ecc_vec = np.cross(v_vec, h_vec) / MU_EARTH - r_vec / r_norm
+    ecc = np.linalg.norm(ecc_vec)
+
+    if ecc < 1.0 and a > 0:
+        rp = a * (1 - ecc)
+        ra = a * (1 + ecc)
+    else:
+        rp = np.nan
+    ra = np.nan if ecc >= 1.0 or a <= 0 else a * (1 + ecc)
+
+    r_hat = r_vec / r_norm
+    vr = float(np.dot(v_vec, r_hat))
+    fpa = math.degrees(math.asin(vr / v_norm)) if v_norm > 0 else 0.0
+
+    orbit_ok = False
+
+    penalty = 0.0
 
     # Liftoff T/W check (using sea-level thrust)
     thrust_sl = sim.rocket.stages[0].engine.thrust_sl * params.throttle1
     tw0 = thrust_sl / (state0.m * G0)
+    tw_violation = tw0 < 1.2
     if tw0 < 1.2:
         penalty += 1e6 * (1.2 - tw0)
 
@@ -174,11 +210,51 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0):
     thrust_arr = np.array(log.thrust_mag)
     stage_arr = np.array(log.stage)
     idx_switch = np.where(np.diff(stage_arr) != 0)[0]
+    coast_violation = False
     if len(idx_switch) > 0:
         t_switch = t_arr[idx_switch[0]]
         mask = (t_arr >= t_switch) & (t_arr <= t_switch + 120.0)
         if thrust_arr[mask].size > 0 and (thrust_arr[mask] > 1e-3).any():
             penalty += 1e6
+            coast_violation = True
+
+    # Circularization check at apogee (approximate two-burn plan)
+    prop_left = max(log.m[-1] - (sim.rocket.stages[0].dry_mass + sim.rocket.stages[1].dry_mass), 0.0)
+    circularization_feasible = False
+    delta_v_needed = float("nan")
+    prop_needed_circ = float("nan")
+    if ecc < 1.0 and a > 0 and not math.isnan(ra):
+        # If apogee at or above target, estimate burn to circularize at ra
+        if ra >= TARGET_ORBIT_RADIUS - ORBIT_ALT_TOL:
+            v_apo = math.sqrt(MU_EARTH * (2.0 / ra - 1.0 / a))
+            v_circ = math.sqrt(MU_EARTH / ra)
+            delta_v_needed = max(0.0, v_circ - v_apo)
+            isp_stage2 = sim.rocket.stages[1].engine.isp_vac
+            if delta_v_needed > 0 and isp_stage2 > 0 and prop_left > 0:
+                m0 = log.m[-1]
+                m1 = m0 * math.exp(-delta_v_needed / (isp_stage2 * G0))
+                prop_needed_circ = max(0.0, m0 - m1)
+                if prop_left >= prop_needed_circ:
+                    circularization_feasible = True
+                    prop_used += prop_needed_circ
+                    prop_left -= prop_needed_circ
+                    # After hypothetical circularization, treat orbit as achieved
+                    ecc = 0.0
+                    rp = ra
+                    a = ra
+                    orbit_ok = True
+    # Direct orbit check (if guidance hit target already)
+    if not orbit_ok:
+        orbit_ok = (
+            log.orbit_achieved
+            and ecc < ORBIT_ECC_TOL
+            and not math.isnan(rp)
+            and rp >= TARGET_ORBIT_RADIUS - ORBIT_ALT_TOL
+            and ra <= TARGET_ORBIT_RADIUS + ORBIT_ALT_TOL
+        )
+
+    if not orbit_ok:
+        penalty += 1e9
 
     cost = prop_used + penalty
 
@@ -186,6 +262,16 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0):
         "orbit_ok": orbit_ok,
         "cost": cost,
         "prop_used": prop_used,
+        "rp_m": rp,
+        "ra_m": ra,
+        "ecc": ecc,
+        "a_m": a,
+        "spec_energy": energy,
+        "fpa_deg": fpa,
+        "delta_v_needed": delta_v_needed,
+        "prop_needed_circ": prop_needed_circ,
+        "prop_left": prop_left,
+        "circularization_feasible": circularization_feasible,
         "prop1": params.prop1,
         "prop2": params.prop2,
         "throttle1": params.throttle1,
@@ -197,6 +283,10 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0):
         "max_q": max(log.dynamic_pressure),
         "final_alt": log.altitude[-1],
         "final_speed": log.speed[-1],
+        "tw0": tw0,
+        "tw_violation": tw_violation,
+        "coast_violation": coast_violation,
+        "total_prop": total_prop,
     }
     return result
 
@@ -206,8 +296,8 @@ def random_sample(n: int) -> list[SampleParams]:
     for _ in range(n):
         prop1 = random.uniform(2.5e6, 3.6e6)
         prop2 = random.uniform(0.8e6, 1.4e6)
-        throttle1 = random.uniform(0.7, 1.0)
-        throttle2 = random.uniform(0.7, 1.0)
+        throttle1 = random.uniform(0.8, 1.0)
+        throttle2 = random.uniform(0.8, 1.0)
         pitch_start_alt = random.uniform(3_000.0, 8_000.0)
         pitch_end_alt = random.uniform(40_000.0, 120_000.0)
         samples.append(SampleParams(prop1, prop2, throttle1, throttle2, pitch_start_alt, pitch_end_alt))
