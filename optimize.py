@@ -37,13 +37,23 @@ ORBIT_RADIAL_TOL = CFG.orbit_radial_tol
 class SampleParams:
     prop1: float
     prop2: float
-    throttle1: float
-    throttle2: float
-    pitch_start_alt: float
-    pitch_end_alt: float
+    throttle1_a: float
+    throttle1_b: float
+    t1_split: float
+    throttle2_a: float
+    throttle2_b: float
+    t2_split: float
+    pitch_alt1: float
+    pitch_alt2: float
+    pitch_alt3: float
+    pitch_alt4: float
+    pitch_ang1_deg: float
+    pitch_ang2_deg: float
+    pitch_ang3_deg: float
+    pitch_ang4_deg: float
 
 
-def make_pitch_program(pitch_start_alt: float, pitch_end_alt: float) -> Callable:
+def make_pitch_program(alts: list[float], angs_deg: list[float]) -> Callable:
     def pitch_prog(t: float, state: State) -> np.ndarray:
         r = np.asarray(state.r_eci, dtype=float)
         v = np.asarray(state.v_eci, dtype=float)
@@ -56,23 +66,19 @@ def make_pitch_program(pitch_start_alt: float, pitch_end_alt: float) -> Callable
         east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
 
         alt = r_norm - R_EARTH
-        if alt < pitch_start_alt:
-            return r_hat
-        elif alt < pitch_end_alt:
-            w = (alt - pitch_start_alt) / max(1.0, (pitch_end_alt - pitch_start_alt))
-            direction = (1.0 - w) * r_hat + w * east
-        else:
-            speed = np.linalg.norm(v)
-            direction = v / speed if speed > 1.0 else east
+        # Interpolate pitch angle vs altitude
+        ang = np.interp(alt, alts, angs_deg)
+        gamma = np.deg2rad(ang)
+        direction = np.cos(gamma) * east + np.sin(gamma) * r_hat
         n = np.linalg.norm(direction)
         return direction / n if n > 0.0 else r_hat
 
     return pitch_prog
 
 
-def make_throttle_schedule(throttle_val: float) -> Callable:
+def make_throttle_schedule(t_split: float, throttle_a: float, throttle_b: float) -> Callable:
     def throttle_fn(t: float, state: State) -> float:
-        return float(throttle_val)
+        return float(throttle_a if t < t_split else throttle_b)
 
     return throttle_fn
 
@@ -114,8 +120,12 @@ def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
         earth_radius=R_EARTH,
     )
 
-    pitch_prog = make_pitch_program(params.pitch_start_alt, params.pitch_end_alt)
-    throttle_fn = make_throttle_schedule(params.throttle1)
+    # Ensure altitudes are sorted with padding at ends
+    alts = sorted([params.pitch_alt1, params.pitch_alt2, params.pitch_alt3, params.pitch_alt4])
+    angs = [params.pitch_ang1_deg, params.pitch_ang2_deg, params.pitch_ang3_deg, params.pitch_ang4_deg]
+    pitch_prog = make_pitch_program(alts, angs)
+
+    throttle_fn = make_throttle_schedule(params.t1_split, params.throttle1_a, params.throttle1_b)
     guidance = Guidance(pitch_program=pitch_prog, throttle_schedule=throttle_fn)
 
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
@@ -146,8 +156,8 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
     # Replace throttle schedule for stage 2 (simple: constant throttle2 after ignition)
     def throttle_sched(t: float, state: State) -> float:
         if getattr(state, "stage_index", 0) == 0:
-            return params.throttle1
-        return params.throttle2
+            return params.throttle1_a if t < params.t1_split else params.throttle1_b
+        return params.throttle2_a if t < params.t2_split else params.throttle2_b
 
     sim.guidance.throttle_schedule = throttle_sched
 
@@ -297,10 +307,20 @@ def params_to_vector(p: SampleParams) -> np.ndarray:
         [
             p.prop1,
             p.prop2,
-            p.throttle1,
-            p.throttle2,
-            p.pitch_start_alt,
-            p.pitch_end_alt,
+            p.throttle1_a,
+            p.throttle1_b,
+            p.t1_split,
+            p.throttle2_a,
+            p.throttle2_b,
+            p.t2_split,
+            p.pitch_alt1,
+            p.pitch_alt2,
+            p.pitch_alt3,
+            p.pitch_alt4,
+            p.pitch_ang1_deg,
+            p.pitch_ang2_deg,
+            p.pitch_ang3_deg,
+            p.pitch_ang4_deg,
         ],
         dtype=float,
     )
@@ -313,10 +333,20 @@ def vector_to_params(x: np.ndarray, bounds: dict) -> SampleParams:
     return SampleParams(
         prop1=clamp(x[0], *bounds["prop1"]),
         prop2=clamp(x[1], *bounds["prop2"]),
-        throttle1=clamp(x[2], *bounds["throttle1"]),
-        throttle2=clamp(x[3], *bounds["throttle2"]),
-        pitch_start_alt=clamp(x[4], *bounds["pitch_start_alt"]),
-        pitch_end_alt=clamp(x[5], *bounds["pitch_end_alt"]),
+        throttle1_a=clamp(x[2], *bounds["throttle1"]),
+        throttle1_b=clamp(x[3], *bounds["throttle1"]),
+        t1_split=clamp(x[4], *bounds["t_split"]),
+        throttle2_a=clamp(x[5], *bounds["throttle2"]),
+        throttle2_b=clamp(x[6], *bounds["throttle2"]),
+        t2_split=clamp(x[7], *bounds["t_split"]),
+        pitch_alt1=clamp(x[8], *bounds["pitch_alt"]),
+        pitch_alt2=clamp(x[9], *bounds["pitch_alt"]),
+        pitch_alt3=clamp(x[10], *bounds["pitch_alt"]),
+        pitch_alt4=clamp(x[11], *bounds["pitch_alt"]),
+        pitch_ang1_deg=clamp(x[12], *bounds["pitch_ang"]),
+        pitch_ang2_deg=clamp(x[13], *bounds["pitch_ang"]),
+        pitch_ang3_deg=clamp(x[14], *bounds["pitch_ang"]),
+        pitch_ang4_deg=clamp(x[15], *bounds["pitch_ang"]),
     )
 
 
@@ -326,10 +356,48 @@ def random_sample(n: int) -> list[SampleParams]:
         prop1 = random.uniform(*CFG.prop1_bounds)
         prop2 = random.uniform(*CFG.prop2_bounds)
         throttle1 = random.uniform(*CFG.throttle1_bounds)
+        throttle1_b = random.uniform(*CFG.throttle1_bounds)
+        t1_split = random.uniform(*CFG.throttle_split_time_bounds)
         throttle2 = random.uniform(*CFG.throttle2_bounds)
+        throttle2_b = random.uniform(*CFG.throttle2_bounds)
+        t2_split = random.uniform(*CFG.throttle_split_time_bounds)
         pitch_start_alt = random.uniform(*CFG.pitch_start_alt_bounds)
         pitch_end_alt = random.uniform(*CFG.pitch_end_alt_bounds)
-        samples.append(SampleParams(prop1, prop2, throttle1, throttle2, pitch_start_alt, pitch_end_alt))
+        # Generate four altitude breakpoints and corresponding angles
+        alts = sorted(
+            [
+                random.uniform(*CFG.pitch_alt_bounds),
+                random.uniform(*CFG.pitch_alt_bounds),
+                random.uniform(*CFG.pitch_alt_bounds),
+                random.uniform(*CFG.pitch_alt_bounds),
+            ]
+        )
+        angs = [
+            random.uniform(*CFG.pitch_angle_bounds_deg),
+            random.uniform(*CFG.pitch_angle_bounds_deg),
+            random.uniform(*CFG.pitch_angle_bounds_deg),
+            random.uniform(*CFG.pitch_angle_bounds_deg),
+        ]
+        samples.append(
+            SampleParams(
+                prop1=prop1,
+                prop2=prop2,
+                throttle1_a=throttle1,
+                throttle1_b=throttle1_b,
+                t1_split=t1_split,
+                throttle2_a=throttle2,
+                throttle2_b=throttle2_b,
+                t2_split=t2_split,
+                pitch_alt1=alts[0],
+                pitch_alt2=alts[1],
+                pitch_alt3=alts[2],
+                pitch_alt4=alts[3],
+                pitch_ang1_deg=angs[0],
+                pitch_ang2_deg=angs[1],
+                pitch_ang3_deg=angs[2],
+                pitch_ang4_deg=angs[3],
+            )
+        )
     return samples
 
 
@@ -399,6 +467,9 @@ def main():
         "throttle2": CFG.throttle2_bounds,
         "pitch_start_alt": CFG.pitch_start_alt_bounds,
         "pitch_end_alt": CFG.pitch_end_alt_bounds,
+        "pitch_alt": CFG.pitch_alt_bounds,
+        "pitch_ang": CFG.pitch_angle_bounds_deg,
+        "t_split": CFG.throttle_split_time_bounds,
     }
 
     results = []
@@ -414,10 +485,20 @@ def main():
             SampleParams(
                 prop1=3.1e6,
                 prop2=1.1e6,
-                throttle1=0.95,
-                throttle2=0.95,
-                pitch_start_alt=5000.0,
-                pitch_end_alt=70000.0,
+                throttle1_a=0.95,
+                throttle1_b=0.9,
+                t1_split=150.0,
+                throttle2_a=0.95,
+                throttle2_b=0.9,
+                t2_split=400.0,
+                pitch_alt1=5000.0,
+                pitch_alt2=20000.0,
+                pitch_alt3=60000.0,
+                pitch_alt4=100000.0,
+                pitch_ang1_deg=85.0,
+                pitch_ang2_deg=60.0,
+                pitch_ang3_deg=30.0,
+                pitch_ang4_deg=5.0,
             )
         )
     seeds.extend(heuristic)

@@ -69,5 +69,10 @@ class Config:
     pitch_start_alt_bounds: tuple[float, float] = (3_000.0, 8_000.0)
     pitch_end_alt_bounds: tuple[float, float] = (40_000.0, 120_000.0)
 
+    # Expanded guidance bounds (multi-breakpoint pitch angles and throttle splits)
+    pitch_alt_bounds: tuple[float, float] = (3_000.0, 120_000.0)
+    pitch_angle_bounds_deg: tuple[float, float] = (0.0, 90.0)  # 90 = vertical, 0 = horizontal
+    throttle_split_time_bounds: tuple[float, float] = (20.0, 400.0)
+
 
 CFG = Config()
