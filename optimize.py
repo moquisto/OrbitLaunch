@@ -15,7 +15,7 @@ from typing import Callable
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 
 from aerodynamics import Aerodynamics, CdModel
 from atmosphere import AtmosphereModel
@@ -150,7 +150,16 @@ def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
     return sim, state0, t_env0
 
 
-def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, return_log: bool = False):
+def evaluate(
+    params: SampleParams,
+    duration: float = 1200.0,
+    dt: float = 0.2,
+    return_log: bool = False,
+    speed_tol: float = ORBIT_SPEED_TOL,
+    radial_tol: float = ORBIT_RADIAL_TOL,
+    alt_tol: float = ORBIT_ALT_TOL,
+    simulate_two_burn: bool = True,
+):
     sim, state0, t_env0 = build_simulation(params)
 
     # Replace throttle schedule for stage 2 (simple: constant throttle2 after ignition)
@@ -167,9 +176,9 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
         dt,
         state0,
         orbit_target_radius=TARGET_ORBIT_RADIUS,
-        orbit_speed_tolerance=ORBIT_SPEED_TOL,
-        orbit_radial_tolerance=ORBIT_RADIAL_TOL,
-        orbit_alt_tolerance=ORBIT_ALT_TOL,
+        orbit_speed_tolerance=speed_tol,
+        orbit_radial_tolerance=radial_tol,
+        orbit_alt_tolerance=alt_tol,
     )
 
     initial_prop = sim.rocket.stages[0].prop_mass + sim.rocket.stages[1].prop_mass
@@ -209,11 +218,18 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
     penalty = 0.0
 
     # Liftoff T/W check (using sea-level thrust)
-    thrust_sl = sim.rocket.stages[0].engine.thrust_sl * params.throttle1
+    thrust_sl = sim.rocket.stages[0].engine.thrust_sl * params.throttle1_a
     tw0 = thrust_sl / (state0.m * G0)
     tw_violation = tw0 < 1.2
     if tw0 < 1.2:
         penalty += 1e6 * (1.2 - tw0)
+
+    # Max-Q constraint (optional)
+    max_q = max(log.dynamic_pressure) if len(log.dynamic_pressure) else 0.0
+    max_q_violation = False
+    if CFG.max_q_limit is not None and max_q > CFG.max_q_limit:
+        penalty += 1e6 * (max_q - CFG.max_q_limit) / CFG.max_q_limit
+        max_q_violation = True
 
     # Stage coast enforcement: ensure no thrust during the 60 s after separation
     t_arr = np.array(log.t_sim)
@@ -228,40 +244,106 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
             penalty += 1e6
             coast_violation = True
 
+    # Max acceleration constraint (approximate)
+    accel_arr = []
+    for r_vec, m_val, th_mag, dr_mag in zip(log.r, log.m, log.thrust_mag, log.drag_mag):
+        r_norm_local = np.linalg.norm(r_vec)
+        g_mag = MU_EARTH / (r_norm_local**2) if r_norm_local > 0 else 0.0
+        a_mag = (th_mag + dr_mag) / max(m_val, 1e-6) + g_mag
+        accel_arr.append(a_mag)
+    max_accel = max(accel_arr) if accel_arr else 0.0
+    max_accel_violation = False
+    if CFG.max_accel_limit is not None and max_accel > CFG.max_accel_limit:
+        penalty += 1e6 * (max_accel - CFG.max_accel_limit) / CFG.max_accel_limit
+        max_accel_violation = True
+
     # Circularization check at apogee (approximate two-burn plan)
     prop_left = remaining_prop if remaining_prop > 0 else 0.0
     circularization_feasible = False
     delta_v_needed = float("nan")
     prop_needed_circ = float("nan")
-    if ecc < 1.0 and a > 0 and not math.isnan(ra):
-        # If apogee at or above target, estimate burn to circularize at ra
-        if ra >= TARGET_ORBIT_RADIUS - ORBIT_ALT_TOL:
-            v_apo = math.sqrt(MU_EARTH * (2.0 / ra - 1.0 / a))
-            v_circ = math.sqrt(MU_EARTH / ra)
-            delta_v_needed = max(0.0, v_circ - v_apo)
-            isp_stage2 = sim.rocket.stages[1].engine.isp_vac
-            if delta_v_needed > 0 and isp_stage2 > 0 and prop_left > 0:
-                m0 = log.m[-1]
-                m1 = m0 * math.exp(-delta_v_needed / (isp_stage2 * G0))
-                prop_needed_circ = max(0.0, m0 - m1)
-                if prop_left >= prop_needed_circ:
-                    circularization_feasible = True
-                    prop_used += prop_needed_circ
-                    prop_left -= prop_needed_circ
-                    # After hypothetical circularization, treat orbit as achieved
-                    ecc = 0.0
-                    rp = ra
-                    a = ra
-                    orbit_ok = True
     # Direct orbit check (if guidance hit target already)
     if not orbit_ok:
         orbit_ok = (
             log.orbit_achieved
             and ecc < ORBIT_ECC_TOL
             and not math.isnan(rp)
-            and rp >= TARGET_ORBIT_RADIUS - ORBIT_ALT_TOL
-            and ra <= TARGET_ORBIT_RADIUS + ORBIT_ALT_TOL
+            and rp >= TARGET_ORBIT_RADIUS - alt_tol
+            and ra <= TARGET_ORBIT_RADIUS + alt_tol
         )
+    # Simulate a coarse coast+burn if not in orbit and feasible
+    if simulate_two_burn and not orbit_ok and ecc < 1.0 and a > 0 and not math.isnan(ra) and prop_left > 0:
+        # Prepare state at end of ascent
+        state_last = State(r_eci=log.r[-1], v_eci=log.v[-1], m=log.m[-1], stage_index=log.stage[-1])
+        # If still on stage 0 but prop depleted, drop booster dry mass and move to stage 1
+        if state_last.stage_index == 0:
+            state_last.m = max(state_last.m - sim.rocket.stages[0].dry_mass, 1e-6)
+            state_last.stage_index = 1
+        # Reset rocket time bookkeeping
+        sim.rocket._last_time = 0.0
+        # Guidance: coast until near apogee (vr <= 0 and r close to ra), then burn prograde
+        class CircularizeGuidance:
+            def __init__(self, ra_target: float, alt_tol_local: float):
+                self.ra_target = ra_target
+                self.alt_tol = alt_tol_local
+            def compute_command(self, t: float, state: State):
+                r_vec = np.asarray(state.r_eci, dtype=float)
+                v_vec = np.asarray(state.v_eci, dtype=float)
+                r_norm_local = np.linalg.norm(r_vec)
+                v_norm_local = np.linalg.norm(v_vec)
+                r_hat_local = r_vec / r_norm_local if r_norm_local > 0 else np.array([0.0, 0.0, 1.0])
+                vr_local = float(np.dot(v_vec, r_hat_local))
+                burn = (abs(r_norm_local - self.ra_target) <= self.alt_tol) and vr_local <= 0.0
+                if v_norm_local > 0:
+                    dir_vec = v_vec / v_norm_local
+                else:
+                    dir_vec = np.array([0.0, 0.0, 1.0])
+                throttle = 1.0 if burn else 0.0
+                return ControlCommand(throttle=throttle, thrust_direction=dir_vec)
+        # Build a new simulation with prograde guidance
+        circ_guidance = CircularizeGuidance(ra_target=ra, alt_tol_local=alt_tol)
+        sim.guidance = circ_guidance
+        log2 = sim.run(
+            t_env_start=t_env0 + log.t_sim[-1],
+            duration=duration,
+            dt=dt,
+            state0=state_last,
+            orbit_target_radius=TARGET_ORBIT_RADIUS,
+            orbit_speed_tolerance=speed_tol,
+            orbit_radial_tolerance=radial_tol,
+            orbit_alt_tolerance=alt_tol,
+        )
+        log = log2  # overwrite log with coast+burn segment
+        # Recompute orbit metrics after circularization attempt
+        r_vec = np.array(log.r[-1], dtype=float)
+        v_vec = np.array(log.v[-1], dtype=float)
+        r_norm = np.linalg.norm(r_vec)
+        v_norm = np.linalg.norm(v_vec)
+        h_vec = np.cross(r_vec, v_vec)
+        h_norm = np.linalg.norm(h_vec)
+        energy = 0.5 * v_norm**2 - MU_EARTH / r_norm
+        a = -MU_EARTH / (2 * energy) if energy != 0 else np.inf
+        ecc_vec = np.cross(v_vec, h_vec) / MU_EARTH - r_vec / r_norm
+        ecc = np.linalg.norm(ecc_vec)
+        if ecc < 1.0 and a > 0:
+            rp = a * (1 - ecc)
+            ra = a * (1 + ecc)
+        else:
+            rp = np.nan
+            ra = np.nan if ecc >= 1.0 or a <= 0 else a * (1 + ecc)
+        r_hat = r_vec / r_norm
+        vr = float(np.dot(v_vec, r_hat))
+        fpa = math.degrees(math.asin(vr / v_norm)) if v_norm > 0 else 0.0
+        orbit_ok = (
+            log.orbit_achieved
+            and ecc < ORBIT_ECC_TOL
+            and not math.isnan(rp)
+            and rp >= TARGET_ORBIT_RADIUS - alt_tol
+            and ra <= TARGET_ORBIT_RADIUS + alt_tol
+        )
+        # Update remaining prop after burn
+        remaining_prop = sum(sim.rocket.stage_prop_remaining)
+        prop_left = remaining_prop if remaining_prop > 0 else 0.0
 
     if not orbit_ok:
         penalty += 1e9
@@ -297,6 +379,10 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
         "tw_violation": tw_violation,
         "coast_violation": coast_violation,
         "total_prop": total_prop,
+        "max_q_violation": max_q_violation,
+        "max_q": max_q,
+        "max_accel": max_accel,
+        "max_accel_violation": max_accel_violation,
     }
     return (result, log) if return_log else result
 
@@ -506,7 +592,16 @@ def main():
     seed_results = []
     for i, params in enumerate(seeds, start=1):
         print(f"Seed {i}/{len(seeds)} (dt={coarse_dt})...")
-        res, log = evaluate(params, duration=coarse_duration, dt=coarse_dt, return_log=True)
+        res, log = evaluate(
+            params,
+            duration=coarse_duration,
+            dt=coarse_dt,
+            return_log=True,
+            speed_tol=CFG.orbit_speed_tol_coarse,
+            radial_tol=CFG.orbit_radial_tol_coarse,
+            alt_tol=CFG.orbit_alt_tol_coarse,
+            simulate_two_burn=True,
+        )
         seed_results.append((res, params, log))
         results.append(res)
         if plot_each:
@@ -520,18 +615,47 @@ def main():
     seed_results.sort(key=lambda t: t[0]["cost"])
     top_seeds = seed_results[: min(top_k, len(seed_results))]
 
-    # Local Nelder-Mead refinement on each top seed (coarse dt for speed)
-    def cost_wrapper(x):
+    # Local global+Nelder-Mead refinement on each top seed
+    def cost_wrapper(x, duration, dt):
         p = vector_to_params(x, bounds)
-        res = evaluate(p, duration=coarse_duration, dt=coarse_dt, return_log=False)
+        res = evaluate(p, duration=duration, dt=dt, return_log=False)
         return res["cost"]
 
     for idx, (res0, p0, _) in enumerate(top_seeds, start=1):
         x0 = params_to_vector(p0)
-        print(f"Nelder-Mead refine seed {idx}/{len(top_seeds)}...")
+        # Differential Evolution global refine (coarse dt)
+        de_bounds = [
+            bounds["prop1"],
+            bounds["prop2"],
+            bounds["throttle1"],
+            bounds["throttle1"],
+            bounds["t_split"],
+            bounds["throttle2"],
+            bounds["throttle2"],
+            bounds["t_split"],
+            bounds["pitch_alt"],
+            bounds["pitch_alt"],
+            bounds["pitch_alt"],
+            bounds["pitch_alt"],
+            bounds["pitch_ang"],
+            bounds["pitch_ang"],
+            bounds["pitch_ang"],
+            bounds["pitch_ang"],
+        ]
+        print(f"DE refine seed {idx}/{len(top_seeds)}...")
+        de_res = differential_evolution(
+            lambda x: cost_wrapper(x, coarse_duration, coarse_dt),
+            de_bounds,
+            maxiter=20,
+            popsize=10,
+            polish=False,
+            disp=False,
+        )
+        # Nelder-Mead polish at finer dt
+        print(f"Nelder-Mead polish seed {idx}/{len(top_seeds)}...")
         nm_res = minimize(
-            cost_wrapper,
-            x0,
+            lambda x: cost_wrapper(x, refine_duration, refine_dt),
+            de_res.x,
             method="Nelder-Mead",
             options={"maxiter": CFG.opt_nm_maxiter, "disp": False},
         )
@@ -566,6 +690,12 @@ def main():
     # Plot final best trajectory
     if best_log is not None:
         plot_trajectory(best_log, "trajectory_best.png", TARGET_ORBIT_RADIUS)
+        # dt sensitivity check
+        res_dt, _ = evaluate(best_params, duration=refine_duration, dt=max(refine_dt * 0.5, 0.05), return_log=False)
+        print("\nDT sensitivity check (half dt):")
+        for k in ["cost", "orbit_ok", "rp_m", "ra_m", "ecc", "prop_used", "max_q", "max_accel"]:
+            if k in res_dt and k in best_res:
+                print(f"  {k}: coarse={best_res.get(k)} fine={res_dt.get(k)}")
 
 
 if __name__ == "__main__":

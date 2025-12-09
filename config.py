@@ -54,6 +54,10 @@ class Config:
     orbit_alt_tol: float = 500.0
     orbit_ecc_tol: float = 0.01
 
+    # Optional path constraints
+    max_q_limit: float | None = None  # set to a Pa value to penalize exceeding
+    max_accel_limit: float | None = None  # set to m/s^2 to penalize exceeding
+
     # Optimizer search parameters
     opt_n_random: int = 15
     opt_n_heuristic: int = 15
@@ -73,6 +77,11 @@ class Config:
     pitch_alt_bounds: tuple[float, float] = (3_000.0, 120_000.0)
     pitch_angle_bounds_deg: tuple[float, float] = (0.0, 90.0)  # 90 = vertical, 0 = horizontal
     throttle_split_time_bounds: tuple[float, float] = (20.0, 400.0)
+
+    # Coarse tolerances for feasibility search
+    orbit_speed_tol_coarse: float = 150.0
+    orbit_radial_tol_coarse: float = 150.0
+    orbit_alt_tol_coarse: float = 5_000.0
 
 
 CFG = Config()
