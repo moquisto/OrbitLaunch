@@ -193,9 +193,24 @@ class Simulation:
         t_env = float(t_env_start)
         t_end_sim = duration
         state = state0
+        # Reset rocket internal timers/state for a fresh run
+        state.stage_index = int(getattr(state, "stage_index", 0))
         self.rocket._last_time = 0.0
+        self.rocket.stage_prop_remaining = [s.prop_mass for s in self.rocket.stages]
+        self.rocket.stage_fuel_empty_time = [None] * len(self.rocket.stages)
+        self.rocket.stage_engine_off_complete_time = [None] * len(self.rocket.stages)
+        self.rocket.separation_time_planned = None
+        self.rocket.upper_ignition_start_time = None
 
         while t_sim <= t_end_sim:
+            # Guard against accidental early stage advance before burnout
+            if (
+                getattr(state, "stage_index", 0) > 0
+                and self.rocket.stage_fuel_empty_time[0] is None
+                and self.rocket.stage_prop_remaining[0] > 0
+            ):
+                state.stage_index = 0
+
             control = self.guidance.compute_command(t_sim, state)
             drdt, dvdt, dmdt, extras = self._rhs(t_env, t_sim, state, control)
             logger.record(t_sim, t_env, state, extras)
@@ -216,6 +231,20 @@ class Simulation:
                     logger.cutoff_reason = "orbit_target_met"
                     break
 
+            # Early termination checks to skip hopeless cases
+            r_norm = np.linalg.norm(state.r_eci)
+            vr = float(np.dot(state.v_eci, state.r_eci / r_norm)) if r_norm > 0 else 0.0
+            altitude = r_norm - self.earth.radius
+            # Impact / sub-surface (allow exactly on the surface)
+            if altitude < -100.0:
+                logger.cutoff_reason = "impact"
+                break
+            # Escape trajectory (positive specific energy and heading outward)
+            specific_energy = 0.5 * np.dot(state.v_eci, state.v_eci) - self.earth.mu / r_norm
+            if specific_energy > 0 and vr > 0 and r_norm > 1.05 * self.earth.radius:
+                logger.cutoff_reason = "escape"
+                break
+
             deriv_fn = lambda tau, s: self._rhs(t_env + (tau - t_sim), tau, s, self.guidance.compute_command(tau, s))[:3]
             state = self.integrator.step(deriv_fn, state, t_sim, dt)
 
@@ -228,7 +257,9 @@ class Simulation:
                     state.stage_index = min(stage_idx + 1, len(self.rocket.stages) - 1)
                     # Ensure upper-stage ignition is scheduled after separation delay
                     self.rocket.stage_engine_off_complete_time[stage_idx] = t_sim
-                    self.rocket.upper_ignition_start_time = t_sim + self.rocket.separation_delay
+                    self.rocket.upper_ignition_start_time = (
+                        t_sim + self.rocket.separation_delay + self.rocket.upper_ignition_delay
+                    )
 
             t_sim += dt
             t_env += dt

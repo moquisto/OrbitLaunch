@@ -331,6 +331,13 @@ class Rocket:
         # Engine performance (uses ambient pressure from the atmosphere model)
         thrust_mag, isp = stage.engine.thrust_and_isp(effective_throttle, p_amb)
 
+        # If propellant for the active stage is gone, force thrust to zero and
+        # ensure we mark fuel depletion (prevents burning past empty).
+        if self.stage_prop_remaining[stage_idx] <= 0.0:
+            thrust_mag = 0.0
+            if self.stage_fuel_empty_time[stage_idx] is None:
+                self.stage_fuel_empty_time[stage_idx] = t
+
         # Direction: use control thrust_dir_eci if provided, otherwise align with velocity
         if thrust_dir is None:
             if speed > 0.0:
