@@ -21,14 +21,13 @@ from simulation import Guidance, Simulation
 from config import CFG
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from typing import Tuple
 
 def simple_pitch_program(t: float, state: State) -> np.ndarray:
     """
     Gravity-turn inspired pitch:
-    - <5 km: vertical
-    - 5–60 km: blend from vertical toward downrange (east)
-    - >60 km: prograde if velocity is established, otherwise downrange
+    Uses start/end altitudes from config.
     """
     r = np.asarray(state.r_eci, dtype=float)
     v = np.asarray(state.v_eci, dtype=float)
@@ -42,10 +41,12 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
     east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
 
     alt = r_norm - R_EARTH
-    if alt < 5_000.0:
+    start = CFG.pitch_turn_start_m
+    end = CFG.pitch_turn_end_m
+    if alt < start:
         return r_hat
-    elif alt < 60_000.0:
-        w = (alt - 5_000.0) / 55_000.0
+    elif alt < end:
+        w = (alt - start) / max(end - start, 1.0)
         direction = (1.0 - w) * r_hat + w * east
     else:
         speed = np.linalg.norm(v)
@@ -145,18 +146,23 @@ def build_rocket() -> Rocket:
         stages=[booster_stage, upper_stage],
         main_engine_ramp_time=CFG.main_engine_ramp_time,
         upper_engine_ramp_time=CFG.upper_engine_ramp_time,
-        meco_mach=6.0,
+        meco_mach=CFG.meco_mach,
         separation_delay=CFG.separation_delay_s,
         upper_ignition_delay=CFG.upper_ignition_delay_s,
-        separation_altitude_m=None,  # stage on depletion trigger, but separation is time-based
+        separation_altitude_m=CFG.separation_altitude_m,  # stage on depletion trigger, but separation is time-based
         earth_radius=R_EARTH,
+        min_throttle=CFG.engine_min_throttle,
     )
 
 
 def build_simulation() -> tuple[Simulation, State, float]:
     earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
-    atmosphere = AtmosphereModel(lat_deg=CFG.launch_lat_deg, lon_deg=CFG.launch_lon_deg)
-    cd_model = CdModel(2.0)
+    atmosphere = AtmosphereModel(
+        h_switch=CFG.atmosphere_switch_alt_m,
+        lat_deg=CFG.launch_lat_deg,
+        lon_deg=CFG.launch_lon_deg,
+    )
+    cd_model = CdModel(CFG.cd_constant)
     rocket = build_rocket()
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
     guidance = Guidance(pitch_program=simple_pitch_program, throttle_schedule=throttle_schedule)
@@ -208,6 +214,8 @@ def main():
         orbit_speed_tolerance=CFG.orbit_speed_tol,
         orbit_radial_tolerance=CFG.orbit_radial_tol,
         orbit_alt_tolerance=CFG.orbit_alt_tol,
+        exit_on_orbit=CFG.exit_on_orbit,
+        post_orbit_coast_s=CFG.post_orbit_coast_s,
     )
 
     # Summary
@@ -291,6 +299,7 @@ def main():
 def plot_trajectory_3d(log, r_earth: float):
     """Static 3D plot of trajectory around a spherical Earth."""
     positions = np.array(log.r)
+    times = np.array(log.t_sim)
 
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -304,8 +313,15 @@ def plot_trajectory_3d(log, r_earth: float):
     ax.plot_surface(x, y, z, cmap="Blues", alpha=0.1, linewidth=0, antialiased=False)
     ax.plot_wireframe(x, y, z, color="lightblue", alpha=0.2, linewidth=0.3)
 
-    # Trajectory
-    ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], color="tab:red", label="Trajectory", lw=2)
+    # Trajectory with time-based color gradient
+    if positions.shape[0] > 1:
+        segments = np.stack([positions[:-1], positions[1:]], axis=1)
+        t_norm = (times - times.min()) / max(times.ptp(), 1e-9)
+        colors = plt.cm.plasma(t_norm[:-1])
+        lc = Line3DCollection(segments, colors=colors, linewidths=2, label="Trajectory")
+        ax.add_collection3d(lc)
+    else:
+        ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], color="tab:red", label="Trajectory", lw=2)
     ax.scatter(positions[0, 0], positions[0, 1], positions[0, 2], color="green", s=30, label="Launch")
     ax.scatter(positions[-1, 0], positions[-1, 1], positions[-1, 2], color="black", s=30, label="Final")
 

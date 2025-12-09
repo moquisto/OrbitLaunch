@@ -132,6 +132,7 @@ class Rocket:
         upper_ignition_delay: float = 30.0,
         separation_altitude_m: Optional[float] = None,
         earth_radius: float = R_EARTH,
+        min_throttle: float = 0.0,
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
@@ -144,6 +145,7 @@ class Rocket:
         self.upper_ignition_delay = float(upper_ignition_delay)
         self.separation_altitude_m = separation_altitude_m
         self.earth_radius = float(earth_radius)
+        self.min_throttle = float(np.clip(min_throttle, 0.0, 1.0))
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -327,6 +329,9 @@ class Rocket:
 
         # Combine stage shape with commanded throttle
         effective_throttle = np.clip(throttle_cmd * shape, 0.0, 1.0)
+        # Enforce minimum throttle when the engine is up to speed (shape ~1) and commanded on.
+        if shape >= 0.99 and effective_throttle > 0.0 and self.min_throttle > 0.0:
+            effective_throttle = max(effective_throttle, self.min_throttle)
 
         # Engine performance (uses ambient pressure from the atmosphere model)
         thrust_mag, isp = stage.engine.thrust_and_isp(effective_throttle, p_amb)

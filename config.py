@@ -31,15 +31,19 @@ class Config:
     upper_prop_mass: float = 8.0e5      # ~800 t prop (two-burn demo)
 
     ref_area_m2: float = 3.14159265359 * (4.5 ** 2)  # ~9 m dia
+    cd_constant: float = 2.0
+    engine_min_throttle: float = 0.4  # Raptor throttle floor (fraction of full thrust)
 
     # Staging/ramps
     main_engine_ramp_time: float = 3.0
     upper_engine_ramp_time: float = 3.0
     separation_delay_s: float = 5.0     # coast after booster cutoff
     upper_ignition_delay_s: float = 2.0 # settle delay before upper ignition
+    meco_mach: float = 6.0
+    separation_altitude_m: float | None = None
 
     # Simulation timing
-    main_duration_s: float = 10000
+    main_duration_s: float = 100000
     main_dt_s: float = 1.0
 
     # Orbit tolerances
@@ -47,10 +51,19 @@ class Config:
     orbit_radial_tol: float = 50.0
     orbit_alt_tol: float = 500.0
     orbit_ecc_tol: float = 0.01
+    exit_on_orbit: bool = False
+    post_orbit_coast_s: float = 0.0
 
     # Optional path constraints
     max_q_limit: float | None = 3e5  # set to a Pa value to penalize exceeding
     max_accel_limit: float | None = 40.0  # set to m/s^2 to penalize exceeding
+
+    # Pitch program shape
+    pitch_turn_start_m: float = 5_000.0
+    pitch_turn_end_m: float = 60_000.0
+
+    # Atmosphere
+    atmosphere_switch_alt_m: float = 86_000.0
 
 
 CFG = Config()

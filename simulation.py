@@ -217,6 +217,8 @@ class Simulation:
         orbit_speed_tolerance: float = 50.0,
         orbit_radial_tolerance: float = 50.0,
         orbit_alt_tolerance: float = 500.0,
+        exit_on_orbit: bool = True,
+        post_orbit_coast_s: float = 0.0,
     ) -> Logger:
         """
         March the simulation forward from t0 to tf with fixed step dt.
@@ -234,6 +236,7 @@ class Simulation:
         self.rocket.stage_engine_off_complete_time = [None] * len(self.rocket.stages)
         self.rocket.separation_time_planned = None
         self.rocket.upper_ignition_start_time = None
+        orbit_coast_end: float | None = None
 
         while t_sim <= t_end_sim:
             # Guard against accidental early stage advance before burnout
@@ -249,7 +252,7 @@ class Simulation:
             logger.record(t_sim, t_env, state, extras)
 
             # Orbit cutoff check
-            if orbit_target_radius is not None:
+            if orbit_target_radius is not None and orbit_coast_end is None:
                 r_norm = np.linalg.norm(state.r_eci)
                 v_norm = np.linalg.norm(state.v_eci)
                 r_hat = state.r_eci / r_norm
@@ -262,7 +265,16 @@ class Simulation:
                 ):
                     logger.orbit_achieved = True
                     logger.cutoff_reason = "orbit_target_met"
-                    break
+                    if exit_on_orbit:
+                        if post_orbit_coast_s > 0.0:
+                            orbit_coast_end = t_sim + post_orbit_coast_s
+                        else:
+                            break
+                    else:
+                        orbit_coast_end = t_end_sim if post_orbit_coast_s <= 0.0 else t_sim + post_orbit_coast_s
+
+            if orbit_coast_end is not None and t_sim >= orbit_coast_end:
+                break
 
             # Early termination checks to skip hopeless cases
             r_norm = np.linalg.norm(state.r_eci)
