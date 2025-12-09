@@ -578,24 +578,47 @@ def main():
     seeds = random_sample(n_random)
     heuristic = []
     for _ in range(n_heuristic):
+        # Educated guesses clustered around plausible ascent values
+        prop1 = min(max(3.1e6 + random.uniform(-1.5e5, 1.5e5), CFG.prop1_bounds[0]), CFG.prop1_bounds[1])
+        prop2 = min(max(1.1e6 + random.uniform(-1.0e5, 1.0e5), CFG.prop2_bounds[0]), CFG.prop2_bounds[1])
+
+        throttle1_a = max(min(random.uniform(0.95, 1.0), CFG.throttle1_bounds[1]), CFG.throttle1_bounds[0])
+        throttle1_b = max(min(random.uniform(0.85, 0.95), CFG.throttle1_bounds[1]), CFG.throttle1_bounds[0])
+        t1_split = max(min(random.uniform(120.0, 170.0), CFG.throttle_split_time_bounds[1]), CFG.throttle_split_time_bounds[0])
+
+        throttle2_a = max(min(random.uniform(0.9, 1.0), CFG.throttle2_bounds[1]), CFG.throttle2_bounds[0])
+        throttle2_b = max(min(random.uniform(0.9, 1.0), CFG.throttle2_bounds[1]), CFG.throttle2_bounds[0])
+        t2_split = max(min(random.uniform(250.0, 450.0), CFG.throttle_split_time_bounds[1]), CFG.throttle_split_time_bounds[0])
+
+        alt1 = random.uniform(3_000.0, 6_000.0)
+        alt2 = random.uniform(15_000.0, 30_000.0)
+        alt3 = random.uniform(50_000.0, 80_000.0)
+        alt4 = random.uniform(100_000.0, min(140_000.0, CFG.pitch_alt_bounds[1]))
+        alts = sorted([alt1, alt2, alt3, alt4])
+
+        ang1 = random.uniform(80.0, 88.0)
+        ang2 = random.uniform(55.0, 70.0)
+        ang3 = random.uniform(25.0, 40.0)
+        ang4 = random.uniform(0.0, 10.0)
+
         heuristic.append(
             SampleParams(
-                prop1=3.1e6,
-                prop2=1.1e6,
-                throttle1_a=0.95,
-                throttle1_b=0.9,
-                t1_split=150.0,
-                throttle2_a=0.95,
-                throttle2_b=0.9,
-                t2_split=400.0,
-                pitch_alt1=5000.0,
-                pitch_alt2=20000.0,
-                pitch_alt3=60000.0,
-                pitch_alt4=100000.0,
-                pitch_ang1_deg=85.0,
-                pitch_ang2_deg=60.0,
-                pitch_ang3_deg=30.0,
-                pitch_ang4_deg=5.0,
+                prop1=prop1,
+                prop2=prop2,
+                throttle1_a=throttle1_a,
+                throttle1_b=throttle1_b,
+                t1_split=t1_split,
+                throttle2_a=throttle2_a,
+                throttle2_b=throttle2_b,
+                t2_split=t2_split,
+                pitch_alt1=alts[0],
+                pitch_alt2=alts[1],
+                pitch_alt3=alts[2],
+                pitch_alt4=alts[3],
+                pitch_ang1_deg=ang1,
+                pitch_ang2_deg=ang2,
+                pitch_ang3_deg=ang3,
+                pitch_ang4_deg=ang4,
             )
         )
     seeds.extend(heuristic)
@@ -759,6 +782,10 @@ def main():
 
     # Sort by cost
     results.sort(key=lambda r: r["cost"])
+
+    # Save best trajectory plot
+    if best_log is not None:
+        plot_trajectory(best_log, "trajectory_best.png", TARGET_ORBIT_RADIUS)
 
     # Write CSV
     fieldnames = list(results[0].keys()) if results else []
