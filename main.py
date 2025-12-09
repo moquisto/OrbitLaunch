@@ -156,7 +156,12 @@ def build_rocket() -> Rocket:
 
 
 def build_simulation() -> tuple[Simulation, State, float]:
-    earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
+    earth = EarthModel(
+        mu=MU_EARTH,
+        radius=R_EARTH,
+        omega_vec=OMEGA_EARTH,
+        j2=CFG.j2_coeff if CFG.use_j2 else None,
+    )
     atmosphere = AtmosphereModel(
         h_switch=CFG.atmosphere_switch_alt_m,
         lat_deg=CFG.launch_lat_deg,

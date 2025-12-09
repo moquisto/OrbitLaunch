@@ -15,6 +15,7 @@ class EarthModel:
     mu: float
     radius: float
     omega_vec: np.ndarray
+    j2: float | None = None
 
     def gravity_accel(self, r_eci: np.ndarray) -> np.ndarray:
         """Return the central gravitational acceleration at a given ECI position.
@@ -34,7 +35,26 @@ class EarthModel:
         if r_norm == 0.0:
             raise ValueError("gravity_accel is undefined at r = 0")
         # Central (spherical) gravity: a = -mu * r / |r|^3
-        return -self.mu * r / r_norm**3
+        a_central = -self.mu * r / r_norm**3
+
+        if self.j2 is None or self.j2 == 0.0:
+            return a_central
+
+        # J2 oblateness perturbation (assuming z aligns with Earth's spin axis)
+        mu = self.mu
+        J2 = self.j2
+        R = self.radius
+        x, y, z = r
+        r2 = r_norm * r_norm
+        z2 = z * z
+        factor = 1.5 * J2 * mu * (R**2) / (r_norm**5)
+        k = 5.0 * z2 / r2
+        a_j2_x = factor * x * (k - 1.0)
+        a_j2_y = factor * y * (k - 1.0)
+        a_j2_z = factor * z * (k - 3.0)
+        a_j2 = np.array([a_j2_x, a_j2_y, a_j2_z], dtype=float)
+
+        return a_central + a_j2
 
     def atmosphere_velocity(self, r_eci: np.ndarray) -> np.ndarray:
         """Return the local velocity of a rigidly co-rotating atmosphere.
@@ -60,6 +80,7 @@ class EarthModel:
 MU_EARTH = 3.986_004_418e14  # m^3/s^2
 R_EARTH = 6_371_000.0  # m
 OMEGA_EARTH = np.array([0.0, 0.0, 7.292_115_9e-5])  # rad/s
+J2_EARTH = 1.082_626_68e-3
 
 
 if __name__ == "__main__":

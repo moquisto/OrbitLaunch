@@ -33,6 +33,8 @@ class Config:
     ref_area_m2: float = 3.14159265359 * (4.5 ** 2)  # ~9 m dia
     cd_constant: float = 0.35
     engine_min_throttle: float = 0.4  # Raptor throttle floor (fraction of full thrust)
+    use_j2: bool = False
+    j2_coeff: float = 1.08262668e-3
 
     # Staging/ramps
     main_engine_ramp_time: float = 3.0
