@@ -1,17 +1,16 @@
 """
-Simulation glue outline: guidance, events, logging, and integration loop.
-Behavior is left unimplemented to serve as a structural template.
+Simulation glue: guidance, events, logging, and integration loop.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict, Any
 
 import numpy as np
 
 from aerodynamics import Aerodynamics
-from atmosphere import CombinedAtmosphere
+from atmosphere import AtmosphereModel
 from gravity import EarthModel
 from integrators import Integrator, RK4, State
 from rocket import Rocket
@@ -25,7 +24,9 @@ class ControlCommand:
 
 class Guidance:
     """
-    Deterministic guidance stub: provides throttle and thrust direction.
+    Deterministic guidance: provides throttle and thrust direction.
+    If no pitch/throttle functions are supplied, defaults to prograde thrust
+    and full throttle.
     """
 
     def __init__(
@@ -37,7 +38,29 @@ class Guidance:
         self.throttle_schedule = throttle_schedule
 
     def compute_command(self, t: float, state: State) -> ControlCommand:
-        raise NotImplementedError("Implement guidance law")
+        # Thrust direction: user pitch program or prograde / +z fallback.
+        if self.pitch_program is not None:
+            direction = np.asarray(self.pitch_program(t, state), dtype=float)
+        else:
+            v = np.asarray(state.v_eci, dtype=float)
+            speed = np.linalg.norm(v)
+            if speed > 0.0:
+                direction = v / speed
+            else:
+                # If stationary, push along +z by default.
+                direction = np.array([0.0, 0.0, 1.0], dtype=float)
+
+        norm = np.linalg.norm(direction)
+        if norm == 0.0:
+            direction = np.array([0.0, 0.0, 1.0], dtype=float)
+            norm = 1.0
+        direction_unit = direction / norm
+
+        # Throttle schedule: user-supplied or full throttle.
+        throttle = 1.0 if self.throttle_schedule is None else float(self.throttle_schedule(t, state))
+        throttle = float(np.clip(throttle, 0.0, 1.0))
+
+        return ControlCommand(throttle=throttle, thrust_direction=direction_unit)
 
 
 class Logger:
@@ -46,21 +69,45 @@ class Logger:
     """
 
     def __init__(self):
-        self.t = []
+        self.t_sim = []
+        self.t_env = []
         self.r = []
         self.v = []
         self.m = []
         self.stage = []
+        self.altitude = []
+        self.speed = []
+        self.thrust_mag = []
+        self.drag_mag = []
+        self.mdot = []
+        self.dynamic_pressure = []
+        self.rho = []
+        self.mach = []
+        self.orbit_achieved = False
+        self.cutoff_reason = ""
 
-    def record(self, t: float, state: State):
-        raise NotImplementedError("Implement logging behavior")
+    def record(self, t_sim: float, t_env: float, state: State, extras: Dict[str, Any]):
+        self.t_sim.append(float(t_sim))
+        self.t_env.append(float(t_env))
+        self.r.append(np.asarray(state.r_eci, dtype=float).copy())
+        self.v.append(np.asarray(state.v_eci, dtype=float).copy())
+        self.m.append(float(state.m))
+        self.stage.append(int(getattr(state, "stage_index", 0)))
+        self.altitude.append(float(extras.get("altitude", 0.0)))
+        self.speed.append(float(extras.get("speed", 0.0)))
+        self.thrust_mag.append(float(extras.get("thrust_mag", 0.0)))
+        self.drag_mag.append(float(extras.get("drag_mag", 0.0)))
+        self.mdot.append(float(extras.get("mdot", 0.0)))
+        self.dynamic_pressure.append(float(extras.get("dynamic_pressure", 0.0)))
+        self.rho.append(float(extras.get("rho", 0.0)))
+        self.mach.append(float(extras.get("mach", 0.0)))
 
 
 class Simulation:
     def __init__(
         self,
         earth: EarthModel,
-        atmosphere: CombinedAtmosphere,
+        atmosphere: AtmosphereModel,
         aerodynamics: Aerodynamics,
         rocket: Rocket,
         integrator: Optional[Integrator] = None,
@@ -73,8 +120,117 @@ class Simulation:
         self.integrator = integrator or RK4()
         self.guidance = guidance or Guidance()
 
-    def _derivatives(self, t: float, state: State, control: ControlCommand):
-        raise NotImplementedError("Implement equations of motion")
+    def _rhs(self, t_env: float, t_sim: float, state: State, control: ControlCommand):
+        r = np.asarray(state.r_eci, dtype=float)
+        v = np.asarray(state.v_eci, dtype=float)
+        mass = max(float(state.m), 1e-6)  # prevent divide-by-zero
 
-    def run(self, t0: float, tf: float, dt: float, state0: State) -> Logger:
-        raise NotImplementedError("Implement main simulation loop")
+        # Gravity
+        a_grav = self.earth.gravity_accel(r)
+
+        # Atmosphere and drag
+        altitude = max(0.0, np.linalg.norm(r) - float(self.earth.radius))
+        props = self.atmosphere.properties(altitude, t_env)
+        p_amb = float(props.p)
+        F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
+
+        # Thrust + mass flow (rocket expects t, throttle, thrust_dir_eci)
+        control_payload = {
+            "t": t_sim,
+            "throttle": control.throttle,
+            "thrust_dir_eci": control.thrust_direction,
+        }
+        F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(control_payload, state, p_amb)
+
+        # Accelerations
+        a_drag = F_drag / mass
+        a_thrust = F_thrust / mass
+
+        dr_dt = v
+        dv_dt = a_grav + a_drag + a_thrust
+        dm_dt = float(dm_dt)
+
+        # Diagnostics
+        v_atm = self.earth.atmosphere_velocity(r)
+        v_rel = v - v_atm
+        v_rel_mag = np.linalg.norm(v_rel)
+        rho = float(props.rho)
+        gamma = 1.4
+        R_air = 287.05
+        a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
+        mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
+        q = 0.5 * rho * v_rel_mag**2
+
+        extras = {
+            "altitude": altitude,
+            "speed": np.linalg.norm(v),
+            "thrust_mag": np.linalg.norm(F_thrust),
+            "drag_mag": np.linalg.norm(F_drag),
+            "mdot": dm_dt,
+            "dynamic_pressure": q,
+            "rho": rho,
+            "mach": mach,
+        }
+
+        return dr_dt, dv_dt, dm_dt, extras
+
+    def run(
+        self,
+        t_env_start: float,
+        duration: float,
+        dt: float,
+        state0: State,
+        orbit_target_radius: float | None = None,
+        orbit_speed_tolerance: float = 50.0,
+        orbit_radial_tolerance: float = 50.0,
+        orbit_alt_tolerance: float = 500.0,
+    ) -> Logger:
+        """
+        March the simulation forward from t0 to tf with fixed step dt.
+        """
+        logger = Logger()
+        t_sim = 0.0
+        t_env = float(t_env_start)
+        t_end_sim = duration
+        state = state0
+        self.rocket._last_time = 0.0
+
+        while t_sim <= t_end_sim:
+            control = self.guidance.compute_command(t_sim, state)
+            drdt, dvdt, dmdt, extras = self._rhs(t_env, t_sim, state, control)
+            logger.record(t_sim, t_env, state, extras)
+
+            # Orbit cutoff check
+            if orbit_target_radius is not None:
+                r_norm = np.linalg.norm(state.r_eci)
+                v_norm = np.linalg.norm(state.v_eci)
+                r_hat = state.r_eci / r_norm
+                vr = float(np.dot(state.v_eci, r_hat))
+                v_circ = np.sqrt(self.earth.mu / orbit_target_radius)
+                if (
+                    abs(r_norm - orbit_target_radius) <= orbit_alt_tolerance
+                    and abs(v_norm - v_circ) <= orbit_speed_tolerance
+                    and abs(vr) <= orbit_radial_tolerance
+                ):
+                    logger.orbit_achieved = True
+                    logger.cutoff_reason = "orbit_target_met"
+                    break
+
+            deriv_fn = lambda tau, s: self._rhs(t_env + (tau - t_sim), tau, s, self.guidance.compute_command(tau, s))[:3]
+            state = self.integrator.step(deriv_fn, state, t_sim, dt)
+
+            # Handle stage separation based on the rocket model's trigger.
+            if self.rocket.stage_separation(state):
+                stage_idx = getattr(state, "stage_index", 0)
+                if stage_idx < len(self.rocket.stages):
+                    dropped_mass = self.rocket.stages[stage_idx].dry_mass
+                    state.m = max(state.m - dropped_mass, 1e-6)
+                    state.stage_index = min(stage_idx + 1, len(self.rocket.stages) - 1)
+                    # Ensure upper-stage ignition is scheduled after separation delay
+                    self.rocket.stage_engine_off_complete_time[stage_idx] = t_sim
+                    self.rocket.upper_ignition_start_time = t_sim + self.rocket.separation_delay
+
+            t_sim += dt
+            t_env += dt
+
+        return logger

@@ -6,7 +6,7 @@ Implementations are placeholders.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Union, Any
+from typing import Callable, Union, Any, Optional
 
 import numpy as np
 from atmosphere import AtmosphereModel
@@ -36,9 +36,9 @@ class CdModel:
 class Aerodynamics:
     atmosphere: AtmosphereModel
     cd_model: CdModel
-    reference_area: float  # [m^2], reference/frontal area of the rocket
+    reference_area: Optional[float] = None  # fallback if rocket is not provided
 
-    def drag_force(self, state: Any, earth: Any, t: float) -> np.ndarray:
+    def drag_force(self, state: Any, earth: Any, t: float, rocket: Any = None) -> np.ndarray:
         """Compute aerodynamic drag force in the ECI frame.
 
         Assumptions
@@ -46,11 +46,12 @@ class Aerodynamics:
         - The rocket's longitudinal axis is aligned with the air-relative
           velocity (zero angle of attack).
         - Drag acts purely opposite to the air-relative velocity vector.
-        - The reference area is constant and represents the effective
-          frontal area normal to the flow.
+        - Reference area is taken per stage from the rocket if provided;
+          otherwise falls back to the constant reference_area on this class.
         - `state` provides `r_eci` and `v_eci` attributes (position and
           velocity in ECI, both as 3-vectors in meters / m/s).
         - `earth` provides `radius` and `atmosphere_velocity(r_eci)`.
+        - `rocket` (optional) provides `reference_area(state)` for stage-aware drag.
         """
         # Extract position and velocity in ECI.
         r = np.asarray(state.r_eci, dtype=float)
@@ -89,8 +90,18 @@ class Aerodynamics:
         # Drag coefficient from model.
         cd = self.cd_model.cd(mach)
 
+        # Reference area: prefer stage-specific area from the rocket, else fallback.
+        if rocket is not None and hasattr(rocket, "reference_area"):
+            A = float(rocket.reference_area(state))
+        elif self.reference_area is not None:
+            A = float(self.reference_area)
+        else:
+            A = 0.0
+
+        if A <= 0.0 or cd <= 0.0:
+            return np.zeros(3)
+
         # Drag magnitude: 0.5 * rho * |v_rel|^2 * Cd * A.
-        A = float(self.reference_area)
         q = 0.5 * rho * v_rel_mag ** 2
         F_mag = q * cd * A
 

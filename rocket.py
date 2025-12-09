@@ -7,9 +7,10 @@ Implementations are placeholders.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import numpy as np
+from gravity import R_EARTH
 
 # -------------------------------
 # Physical constants
@@ -127,7 +128,10 @@ class Rocket:
         main_engine_ramp_time: float = 1.0,
         upper_engine_ramp_time: float = 1.0,
         meco_mach: float = 6.0,
-        separation_delay: float = 2.0,
+        separation_delay: float = 120.0,
+        upper_ignition_delay: float = 120.0,
+        separation_altitude_m: Optional[float] = None,
+        earth_radius: float = R_EARTH,
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
@@ -137,6 +141,9 @@ class Rocket:
         self.upper_engine_ramp_time = float(upper_engine_ramp_time)
         self.meco_mach = float(meco_mach)
         self.separation_delay = float(separation_delay)
+        self.upper_ignition_delay = float(upper_ignition_delay)
+        self.separation_altitude_m = separation_altitude_m
+        self.earth_radius = float(earth_radius)
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -147,8 +154,8 @@ class Rocket:
         self.stage_fuel_empty_time: list[float | None] = [None] * len(stages)
         self.stage_engine_off_complete_time: list[float | None] = [None] * len(stages)
 
-        # Planned timeline events driven by stage 1 fuel depletion:
-        #  - separation_time_planned: booster jettison time
+        # Planned timeline events driven by stage 1 fuel depletion unless overridden by altitude:
+        #  - separation_time_planned: booster jettison time (if no altitude specified)
         #  - upper_ignition_start_time: upper-stage ramp-up start time
         self.separation_time_planned: float | None = None
         self.upper_ignition_start_time: float | None = None
@@ -278,10 +285,9 @@ class Rocket:
                         off_time = fuel_empty_time + 1.0
                         self.stage_engine_off_complete_time[0] = off_time
                     if self.separation_time_planned is None:
-                        # 60 s after engine-off: separation
-                        self.separation_time_planned = off_time + 60.0
-                        # 60 s after separation: upper-stage ignition start
-                        self.upper_ignition_start_time = self.separation_time_planned + 60.0
+                        # Schedule separation and upper ignition based on configured delays
+                        self.separation_time_planned = off_time + self.separation_delay
+                        self.upper_ignition_start_time = self.separation_time_planned + self.upper_ignition_delay
 
         else:
             # Upper stage / payload stage
@@ -379,20 +385,39 @@ class Rocket:
             * subtract the booster dry mass from State.m, and
             * increment State.stage_index.
 
-        Typical usage in the outer integrator loop might look like:
-
-            if rocket.stage_separation(state):
-                state.m -= booster_dry_mass
-                state.stage_index = 1
+        Separation trigger rules:
+            * If separation_altitude_m was provided at init, trigger when
+              altitude >= separation_altitude_m.
+            * Otherwise trigger when stage 0 fuel is depleted (as tracked by
+              stage_prop_remaining / stage_fuel_empty_time).
 
         """
-        if self.separation_time_planned is None:
-            return False
         if self.current_stage_index(state) > 0:
             # Already on upper stage
             return False
-        # Use the last time passed into thrust_and_mass_flow
-        return self._last_time >= self.separation_time_planned
+
+        # Compute altitude if possible (state must have r_eci)
+        altitude = None
+        if hasattr(state, "r_eci"):
+            r_vec = np.asarray(state.r_eci, dtype=float)
+            r_norm = np.linalg.norm(r_vec)
+            altitude = max(0.0, r_norm - self.earth_radius)
+
+        # Altitude-based trigger if specified
+        if self.separation_altitude_m is not None and altitude is not None:
+            if altitude >= float(self.separation_altitude_m):
+                return True
+
+        # Fuel depletion trigger
+        fuel_empty = self.stage_fuel_empty_time[0] is not None or self.stage_prop_remaining[0] <= 0.0
+        if fuel_empty:
+            return True
+
+        # Time-based fallback (if previously scheduled)
+        if self.separation_time_planned is not None:
+            return self._last_time >= self.separation_time_planned
+
+        return False
 
 
 # ------------------------------------------------------------------
