@@ -387,9 +387,8 @@ class Rocket:
         Separation trigger rules:
             * If separation_altitude_m was provided at init, trigger when
               altitude >= separation_altitude_m.
-            * Otherwise trigger when stage 0 fuel is depleted (as tracked by
-              stage_prop_remaining / stage_fuel_empty_time).
-
+            * Otherwise trigger when the scheduled separation_time_planned
+              has been reached (set after fuel depletion and ramp-down).
         """
         if self.current_stage_index(state) > 0:
             # Already on upper stage
@@ -407,12 +406,7 @@ class Rocket:
             if altitude >= float(self.separation_altitude_m):
                 return True
 
-        # Fuel depletion trigger
-        fuel_empty = self.stage_fuel_empty_time[0] is not None or self.stage_prop_remaining[0] <= 0.0
-        if fuel_empty:
-            return True
-
-        # Time-based fallback (if previously scheduled)
+        # Time-based trigger if scheduled
         if self.separation_time_planned is not None:
             return self._last_time >= self.separation_time_planned
 

@@ -18,13 +18,9 @@ from gravity import EarthModel, MU_EARTH, OMEGA_EARTH, R_EARTH
 from integrators import RK4, State
 from rocket import Engine, Rocket, Stage
 from simulation import Guidance, Simulation
+from config import CFG
 import matplotlib.pyplot as plt
 from matplotlib import animation
-
-# Launch site: SpaceX LC-39A, Florida
-LAUNCH_LAT_DEG = 28.60839
-LAUNCH_LON_DEG = -80.60433
-
 
 def simple_pitch_program(t: float, state: State) -> np.ndarray:
     """
@@ -68,45 +64,46 @@ def throttle_schedule(t: float, state: State) -> float:
 def build_rocket() -> Rocket:
     # Approximate BFR-like stages (order-of-magnitude values)
     booster_engine = Engine(
-        thrust_vac=7.35e7,  # N
-        thrust_sl=7.0e7,  # N
-        isp_vac=347.0,  # s
-        isp_sl=327.0,  # s
+        thrust_vac=CFG.booster_thrust_vac,
+        thrust_sl=CFG.booster_thrust_sl,
+        isp_vac=CFG.booster_isp_vac,
+        isp_sl=CFG.booster_isp_sl,
     )
     upper_engine = Engine(
-        thrust_vac=1.5e7,  # N
-        thrust_sl=1.2e7,  # N
-        isp_vac=380.0,  # s
-        isp_sl=330.0,  # s
+        thrust_vac=CFG.upper_thrust_vac,
+        thrust_sl=CFG.upper_thrust_sl,
+        isp_vac=CFG.upper_isp_vac,
+        isp_sl=CFG.upper_isp_sl,
     )
 
     booster_stage = Stage(
-        dry_mass=2.7e5,  # kg
-        prop_mass=3.4e6,  # kg
+        dry_mass=CFG.booster_dry_mass,
+        prop_mass=CFG.booster_prop_mass,
         engine=booster_engine,
-        ref_area=np.pi * (4.5**2),  # ~9 m dia
+        ref_area=CFG.ref_area_m2,
     )
     upper_stage = Stage(
-        dry_mass=1.3e5,  # kg
-        prop_mass=1.2e6,  # kg
+        dry_mass=CFG.upper_dry_mass,
+        prop_mass=CFG.upper_prop_mass,
         engine=upper_engine,
-        ref_area=np.pi * (4.5**2),
+        ref_area=CFG.ref_area_m2,
     )
 
     return Rocket(
         stages=[booster_stage, upper_stage],
-        main_engine_ramp_time=1.0,
-        upper_engine_ramp_time=1.0,
+        main_engine_ramp_time=CFG.main_engine_ramp_time,
+        upper_engine_ramp_time=CFG.upper_engine_ramp_time,
         meco_mach=6.0,
-        separation_delay=2.0,
-        separation_altitude_m=None,  # stage on depletion
+        separation_delay=CFG.separation_delay_s,
+        upper_ignition_delay=CFG.upper_ignition_delay_s,
+        separation_altitude_m=None,  # stage on depletion trigger, but separation is time-based
         earth_radius=R_EARTH,
     )
 
 
 def build_simulation() -> tuple[Simulation, State, float]:
     earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
-    atmosphere = AtmosphereModel(lat_deg=LAUNCH_LAT_DEG, lon_deg=LAUNCH_LON_DEG)
+    atmosphere = AtmosphereModel(lat_deg=CFG.launch_lat_deg, lon_deg=CFG.launch_lon_deg)
     cd_model = CdModel(2.0)
     rocket = build_rocket()
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
@@ -115,8 +112,8 @@ def build_simulation() -> tuple[Simulation, State, float]:
     sim = Simulation(earth=earth, atmosphere=atmosphere, aerodynamics=aero, rocket=rocket, integrator=integrator, guidance=guidance)
 
     # Initial state: surface at launch site, co-rotating atmosphere
-    lat = np.deg2rad(LAUNCH_LAT_DEG)
-    lon = np.deg2rad(LAUNCH_LON_DEG)
+    lat = np.deg2rad(CFG.launch_lat_deg)
+    lon = np.deg2rad(CFG.launch_lon_deg)
     r0 = R_EARTH * np.array(
         [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
         dtype=float,
@@ -135,19 +132,19 @@ def build_simulation() -> tuple[Simulation, State, float]:
 
 def main():
     sim, state0, t_env0 = build_simulation()
-    duration = 800.0  # seconds
-    dt = 1.0
+    duration = CFG.main_duration_s
+    dt = CFG.main_dt_s
 
-    orbit_radius = R_EARTH + 420_000.0  # ISS-like LEO target
+    orbit_radius = R_EARTH + CFG.target_orbit_alt_m  # ISS-like LEO target
     log = sim.run(
         t_env0,
         duration,
         dt,
         state0,
         orbit_target_radius=orbit_radius,
-        orbit_speed_tolerance=50.0,
-        orbit_radial_tolerance=50.0,
-        orbit_alt_tolerance=500.0,
+        orbit_speed_tolerance=CFG.orbit_speed_tol,
+        orbit_radial_tolerance=CFG.orbit_radial_tol,
+        orbit_alt_tolerance=CFG.orbit_alt_tol,
     )
 
     # Summary
@@ -209,7 +206,6 @@ def plot_trajectory_3d(log, r_earth: float):
     ax.set_ylim(-lim, lim)
     ax.set_zlim(-lim, lim)
 
-    ax.set_box_aspect((1, 1, 1))
     ax.set_box_aspect((1, 1, 1))
     ax.view_init(elev=25, azim=35)
     ax.set_xlabel("x [m]")
@@ -274,7 +270,6 @@ def animate_trajectory(log, r_earth: float):
         blit=True,
         repeat=False,
     )
-    plt.show()
     ax.set_title("Trajectory Animation")
     plt.show()
 

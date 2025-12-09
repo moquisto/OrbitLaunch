@@ -23,17 +23,14 @@ from gravity import EarthModel, MU_EARTH, OMEGA_EARTH, R_EARTH
 from integrators import RK4, State
 from rocket import Engine, Rocket, Stage
 from simulation import Guidance, Simulation
+from config import CFG
 
-# Launch site
-LAUNCH_LAT_DEG = 28.60839
-LAUNCH_LON_DEG = -80.60433
-
-TARGET_ORBIT_RADIUS = R_EARTH + 420_000.0
+TARGET_ORBIT_RADIUS = R_EARTH + CFG.target_orbit_alt_m
 G0 = 9.80665
-ORBIT_ALT_TOL = 5_000.0  # meters
+ORBIT_ALT_TOL = CFG.orbit_alt_tol
 ORBIT_ECC_TOL = 0.01
-ORBIT_SPEED_TOL = 50.0
-ORBIT_RADIAL_TOL = 50.0
+ORBIT_SPEED_TOL = CFG.orbit_speed_tol
+ORBIT_RADIAL_TOL = CFG.orbit_radial_tol
 
 
 @dataclass
@@ -82,37 +79,37 @@ def make_throttle_schedule(throttle_val: float) -> Callable:
 
 def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
     earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
-    atmosphere = AtmosphereModel(lat_deg=LAUNCH_LAT_DEG, lon_deg=LAUNCH_LON_DEG)
+    atmosphere = AtmosphereModel(lat_deg=CFG.launch_lat_deg, lon_deg=CFG.launch_lon_deg)
     cd_model = CdModel(2.0)
 
     booster_engine = Engine(
-        thrust_vac=7.35e7,
-        thrust_sl=7.0e7,
-        isp_vac=347.0,
-        isp_sl=327.0,
+        thrust_vac=CFG.booster_thrust_vac,
+        thrust_sl=CFG.booster_thrust_sl,
+        isp_vac=CFG.booster_isp_vac,
+        isp_sl=CFG.booster_isp_sl,
     )
     upper_engine = Engine(
-        thrust_vac=1.5e7,
-        thrust_sl=1.2e7,
-        isp_vac=380.0,
-        isp_sl=330.0,
+        thrust_vac=CFG.upper_thrust_vac,
+        thrust_sl=CFG.upper_thrust_sl,
+        isp_vac=CFG.upper_isp_vac,
+        isp_sl=CFG.upper_isp_sl,
     )
     booster_stage = Stage(
-        dry_mass=2.7e5,
+        dry_mass=CFG.booster_dry_mass,
         prop_mass=params.prop1,
         engine=booster_engine,
-        ref_area=np.pi * (4.5**2),
+        ref_area=CFG.ref_area_m2,
     )
     upper_stage = Stage(
-        dry_mass=1.3e5,
+        dry_mass=CFG.upper_dry_mass,
         prop_mass=params.prop2,
         engine=upper_engine,
-        ref_area=np.pi * (4.5**2),
+        ref_area=CFG.ref_area_m2,
     )
     rocket = Rocket(
         stages=[booster_stage, upper_stage],
-        separation_delay=60.0,
-        upper_ignition_delay=60.0,
+        separation_delay=CFG.separation_delay_s,
+        upper_ignition_delay=CFG.upper_ignition_delay_s,
         separation_altitude_m=None,
         earth_radius=R_EARTH,
     )
@@ -133,8 +130,8 @@ def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
     )
 
     # Initial state at launch site
-    lat = math.radians(LAUNCH_LAT_DEG)
-    lon = math.radians(LAUNCH_LON_DEG)
+    lat = math.radians(CFG.launch_lat_deg)
+    lon = math.radians(CFG.launch_lon_deg)
     r0 = R_EARTH * np.array([math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat)], dtype=float)
     v0 = earth.atmosphere_velocity(r0)
     m0 = booster_stage.total_mass() + upper_stage.total_mass()
@@ -386,14 +383,14 @@ def plot_trajectory(log, filename: str | None = None, target_radius: float | Non
 
 def main():
     # Settings: coarse sweep then local refinement with Nelder-Mead
-    n_random = 15  # random seeds
-    n_heuristic = 15  # heuristic seeds
-    top_k = 3
-    coarse_duration = 800.0
-    coarse_dt = 1.0
-    refine_duration = 1200.0
-    refine_dt = 0.2
-    plot_each = False  # set True to save every sample trajectory
+    n_random = CFG.opt_n_random
+    n_heuristic = CFG.opt_n_heuristic
+    top_k = CFG.opt_top_k
+    coarse_duration = CFG.opt_coarse_duration_s
+    coarse_dt = CFG.opt_coarse_dt_s
+    refine_duration = CFG.opt_refine_duration_s
+    refine_dt = CFG.opt_refine_dt_s
+    plot_each = CFG.opt_plot_each  # set True to save every sample trajectory
 
     bounds = {
         "prop1": (2.5e6, 3.6e6),
@@ -455,7 +452,7 @@ def main():
             cost_wrapper,
             x0,
             method="Nelder-Mead",
-            options={"maxiter": 60, "disp": False},
+            options={"maxiter": CFG.opt_nm_maxiter, "disp": False},
         )
         p_nm = vector_to_params(nm_res.x, bounds)
         res_nm, log_nm = evaluate(p_nm, duration=refine_duration, dt=refine_dt, return_log=True)
