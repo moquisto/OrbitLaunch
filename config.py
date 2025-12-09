@@ -31,7 +31,7 @@ class Config:
     upper_prop_mass: float = 8.0e5      # ~800 t prop (two-burn demo)
 
     ref_area_m2: float = 3.14159265359 * (4.5 ** 2)  # ~9 m dia
-    cd_constant: float = 2.0
+    cd_constant: float = 0.35
     engine_min_throttle: float = 0.4  # Raptor throttle floor (fraction of full thrust)
 
     # Staging/ramps
