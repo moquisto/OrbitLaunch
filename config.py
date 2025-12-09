@@ -52,6 +52,7 @@ class Config:
     orbit_speed_tol: float = 50.0
     orbit_radial_tol: float = 50.0
     orbit_alt_tol: float = 500.0
+    orbit_ecc_tol: float = 0.01
 
     # Optimizer search parameters
     opt_n_random: int = 15
@@ -59,6 +60,14 @@ class Config:
     opt_top_k: int = 3
     opt_nm_maxiter: int = 60
     opt_plot_each: bool = False
+
+    # Optimizer parameter bounds
+    prop1_bounds: tuple[float, float] = (2.5e6, 3.6e6)
+    prop2_bounds: tuple[float, float] = (0.8e6, 1.4e6)
+    throttle1_bounds: tuple[float, float] = (0.8, 1.0)
+    throttle2_bounds: tuple[float, float] = (0.8, 1.0)
+    pitch_start_alt_bounds: tuple[float, float] = (3_000.0, 8_000.0)
+    pitch_end_alt_bounds: tuple[float, float] = (40_000.0, 120_000.0)
 
 
 CFG = Config()

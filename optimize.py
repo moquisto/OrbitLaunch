@@ -28,7 +28,7 @@ from config import CFG
 TARGET_ORBIT_RADIUS = R_EARTH + CFG.target_orbit_alt_m
 G0 = 9.80665
 ORBIT_ALT_TOL = CFG.orbit_alt_tol
-ORBIT_ECC_TOL = 0.01
+ORBIT_ECC_TOL = CFG.orbit_ecc_tol
 ORBIT_SPEED_TOL = CFG.orbit_speed_tol
 ORBIT_RADIAL_TOL = CFG.orbit_radial_tol
 
@@ -323,12 +323,12 @@ def vector_to_params(x: np.ndarray, bounds: dict) -> SampleParams:
 def random_sample(n: int) -> list[SampleParams]:
     samples = []
     for _ in range(n):
-        prop1 = random.uniform(2.5e6, 3.6e6)
-        prop2 = random.uniform(0.8e6, 1.4e6)
-        throttle1 = random.uniform(0.8, 1.0)
-        throttle2 = random.uniform(0.8, 1.0)
-        pitch_start_alt = random.uniform(3_000.0, 8_000.0)
-        pitch_end_alt = random.uniform(40_000.0, 120_000.0)
+        prop1 = random.uniform(*CFG.prop1_bounds)
+        prop2 = random.uniform(*CFG.prop2_bounds)
+        throttle1 = random.uniform(*CFG.throttle1_bounds)
+        throttle2 = random.uniform(*CFG.throttle2_bounds)
+        pitch_start_alt = random.uniform(*CFG.pitch_start_alt_bounds)
+        pitch_end_alt = random.uniform(*CFG.pitch_end_alt_bounds)
         samples.append(SampleParams(prop1, prop2, throttle1, throttle2, pitch_start_alt, pitch_end_alt))
     return samples
 
@@ -393,12 +393,12 @@ def main():
     plot_each = CFG.opt_plot_each  # set True to save every sample trajectory
 
     bounds = {
-        "prop1": (2.5e6, 3.6e6),
-        "prop2": (0.8e6, 1.4e6),
-        "throttle1": (0.8, 1.0),
-        "throttle2": (0.8, 1.0),
-        "pitch_start_alt": (3_000.0, 8_000.0),
-        "pitch_end_alt": (40_000.0, 120_000.0),
+        "prop1": CFG.prop1_bounds,
+        "prop2": CFG.prop2_bounds,
+        "throttle1": CFG.throttle1_bounds,
+        "throttle2": CFG.throttle2_bounds,
+        "pitch_start_alt": CFG.pitch_start_alt_bounds,
+        "pitch_end_alt": CFG.pitch_end_alt_bounds,
     }
 
     results = []
