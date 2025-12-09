@@ -64,6 +64,9 @@ class Config:
     opt_top_k: int = 3
     opt_nm_maxiter: int = 60
     opt_plot_each: bool = False
+    opt_use_cma: bool = True
+    opt_cma_maxiter: int = 50
+    opt_cma_sigma_scale: float = 0.2  # fraction of each bound range for initial sigma
 
     # Optimizer parameter bounds
     prop1_bounds: tuple[float, float] = (2.5e6, 3.6e6)

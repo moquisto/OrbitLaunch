@@ -16,13 +16,18 @@ from typing import Callable
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize, differential_evolution
+try:
+    import cma
+    CMA_AVAILABLE = True
+except ImportError:
+    CMA_AVAILABLE = False
 
 from aerodynamics import Aerodynamics, CdModel
 from atmosphere import AtmosphereModel
 from gravity import EarthModel, MU_EARTH, OMEGA_EARTH, R_EARTH
 from integrators import RK4, State
 from rocket import Engine, Rocket, Stage
-from simulation import Guidance, Simulation
+from simulation import Guidance, Simulation, ControlCommand
 from config import CFG
 
 TARGET_ORBIT_RADIUS = R_EARTH + CFG.target_orbit_alt_m
@@ -366,10 +371,20 @@ def evaluate(
         "circularization_feasible": circularization_feasible,
         "prop1": params.prop1,
         "prop2": params.prop2,
-        "throttle1": params.throttle1,
-        "throttle2": params.throttle2,
-        "pitch_start_alt": params.pitch_start_alt,
-        "pitch_end_alt": params.pitch_end_alt,
+        "throttle1_a": params.throttle1_a,
+        "throttle1_b": params.throttle1_b,
+        "t1_split": params.t1_split,
+        "throttle2_a": params.throttle2_a,
+        "throttle2_b": params.throttle2_b,
+        "t2_split": params.t2_split,
+        "pitch_alt1": params.pitch_alt1,
+        "pitch_alt2": params.pitch_alt2,
+        "pitch_alt3": params.pitch_alt3,
+        "pitch_alt4": params.pitch_alt4,
+        "pitch_ang1_deg": params.pitch_ang1_deg,
+        "pitch_ang2_deg": params.pitch_ang2_deg,
+        "pitch_ang3_deg": params.pitch_ang3_deg,
+        "pitch_ang4_deg": params.pitch_ang4_deg,
         "max_alt": max(log.altitude),
         "max_speed": max(log.speed),
         "max_q": max(log.dynamic_pressure),
@@ -447,8 +462,6 @@ def random_sample(n: int) -> list[SampleParams]:
         throttle2 = random.uniform(*CFG.throttle2_bounds)
         throttle2_b = random.uniform(*CFG.throttle2_bounds)
         t2_split = random.uniform(*CFG.throttle_split_time_bounds)
-        pitch_start_alt = random.uniform(*CFG.pitch_start_alt_bounds)
-        pitch_end_alt = random.uniform(*CFG.pitch_end_alt_bounds)
         # Generate four altitude breakpoints and corresponding angles
         alts = sorted(
             [
@@ -551,8 +564,6 @@ def main():
         "prop2": CFG.prop2_bounds,
         "throttle1": CFG.throttle1_bounds,
         "throttle2": CFG.throttle2_bounds,
-        "pitch_start_alt": CFG.pitch_start_alt_bounds,
-        "pitch_end_alt": CFG.pitch_end_alt_bounds,
         "pitch_alt": CFG.pitch_alt_bounds,
         "pitch_ang": CFG.pitch_angle_bounds_deg,
         "t_split": CFG.throttle_split_time_bounds,
@@ -611,63 +622,140 @@ def main():
             best_params = params
             best_log = log
 
-    # Select top_k seeds
-    seed_results.sort(key=lambda t: t[0]["cost"])
-    top_seeds = seed_results[: min(top_k, len(seed_results))]
-
-    # Local global+Nelder-Mead refinement on each top seed
-    def cost_wrapper(x, duration, dt):
+    # Cost wrappers
+    def cost_wrapper(x, duration, dt, speed_tol, radial_tol, alt_tol):
         p = vector_to_params(x, bounds)
-        res = evaluate(p, duration=duration, dt=dt, return_log=False)
+        res = evaluate(
+            p,
+            duration=duration,
+            dt=dt,
+            return_log=False,
+            speed_tol=speed_tol,
+            radial_tol=radial_tol,
+            alt_tol=alt_tol,
+        )
         return res["cost"]
 
-    for idx, (res0, p0, _) in enumerate(top_seeds, start=1):
-        x0 = params_to_vector(p0)
-        # Differential Evolution global refine (coarse dt)
-        de_bounds = [
-            bounds["prop1"],
-            bounds["prop2"],
-            bounds["throttle1"],
-            bounds["throttle1"],
-            bounds["t_split"],
-            bounds["throttle2"],
-            bounds["throttle2"],
-            bounds["t_split"],
-            bounds["pitch_alt"],
-            bounds["pitch_alt"],
-            bounds["pitch_alt"],
-            bounds["pitch_alt"],
-            bounds["pitch_ang"],
-            bounds["pitch_ang"],
-            bounds["pitch_ang"],
-            bounds["pitch_ang"],
+    # Global search with CMA-ES if available, otherwise DE on best seed
+    best_x = None
+    lower_bounds = [
+        bounds["prop1"][0],
+        bounds["prop2"][0],
+        bounds["throttle1"][0],
+        bounds["throttle1"][0],
+        bounds["t_split"][0],
+        bounds["throttle2"][0],
+        bounds["throttle2"][0],
+        bounds["t_split"][0],
+        bounds["pitch_alt"][0],
+        bounds["pitch_alt"][0],
+        bounds["pitch_alt"][0],
+        bounds["pitch_alt"][0],
+        bounds["pitch_ang"][0],
+        bounds["pitch_ang"][0],
+        bounds["pitch_ang"][0],
+        bounds["pitch_ang"][0],
+    ]
+    upper_bounds = [
+        bounds["prop1"][1],
+        bounds["prop2"][1],
+        bounds["throttle1"][1],
+        bounds["throttle1"][1],
+        bounds["t_split"][1],
+        bounds["throttle2"][1],
+        bounds["throttle2"][1],
+        bounds["t_split"][1],
+        bounds["pitch_alt"][1],
+        bounds["pitch_alt"][1],
+        bounds["pitch_alt"][1],
+        bounds["pitch_alt"][1],
+        bounds["pitch_ang"][1],
+        bounds["pitch_ang"][1],
+        bounds["pitch_ang"][1],
+        bounds["pitch_ang"][1],
+    ]
+    if CMA_AVAILABLE and CFG.opt_use_cma:
+        x0 = [(lo + hi) / 2.0 for lo, hi in zip(lower_bounds, upper_bounds)]
+        sigma = [
+            CFG.opt_cma_sigma_scale * max(1e-6, hi - lo) for lo, hi in zip(lower_bounds, upper_bounds)
         ]
-        print(f"DE refine seed {idx}/{len(top_seeds)}...")
+        print("Running CMA-ES global search...")
+        es = cma.CMAEvolutionStrategy(
+            x0,
+            sigma,
+            {
+                "bounds": [lower_bounds, upper_bounds],
+                "maxiter": CFG.opt_cma_maxiter,
+                "verb_disp": 1,
+            },
+        )
+        while not es.stop():
+            xs = es.ask()
+            costs = [
+                cost_wrapper(
+                    x,
+                    duration=coarse_duration,
+                    dt=coarse_dt,
+                    speed_tol=CFG.orbit_speed_tol_coarse,
+                    radial_tol=CFG.orbit_radial_tol_coarse,
+                    alt_tol=CFG.orbit_alt_tol_coarse,
+                )
+                for x in xs
+            ]
+            es.tell(xs, costs)
+        best_x = es.result.xbest
+    else:
+        # Fallback: take best seed params as starting point and run DE
+        seed_results.sort(key=lambda t: t[0]["cost"])
+        top_seeds = seed_results[: min(top_k, len(seed_results))]
+        if top_seeds:
+            _, p0, _ = top_seeds[0]
+            x0 = params_to_vector(p0)
+        else:
+            x0 = [(lo + hi) / 2.0 for lo, hi in zip(lower_bounds, upper_bounds)]
+        de_bounds = list(zip(lower_bounds, upper_bounds))
+        print("Running DE global search (fallback)...")
         de_res = differential_evolution(
-            lambda x: cost_wrapper(x, coarse_duration, coarse_dt),
+            lambda x: cost_wrapper(
+                x,
+                duration=coarse_duration,
+                dt=coarse_dt,
+                speed_tol=CFG.orbit_speed_tol_coarse,
+                radial_tol=CFG.orbit_radial_tol_coarse,
+                alt_tol=CFG.orbit_alt_tol_coarse,
+            ),
             de_bounds,
             maxiter=20,
             popsize=10,
             polish=False,
             disp=False,
         )
-        # Nelder-Mead polish at finer dt
-        print(f"Nelder-Mead polish seed {idx}/{len(top_seeds)}...")
-        nm_res = minimize(
-            lambda x: cost_wrapper(x, refine_duration, refine_dt),
-            de_res.x,
-            method="Nelder-Mead",
-            options={"maxiter": CFG.opt_nm_maxiter, "disp": False},
-        )
-        p_nm = vector_to_params(nm_res.x, bounds)
-        res_nm, log_nm = evaluate(p_nm, duration=refine_duration, dt=refine_dt, return_log=True)
-        results.append(res_nm)
-        if plot_each:
-            plot_trajectory(log_nm, f"trajectory_nm_{idx}.png", TARGET_ORBIT_RADIUS)
-        if best_res is None or res_nm["cost"] < best_res["cost"]:
-            best_res = res_nm
-            best_params = p_nm
-            best_log = log_nm
+        best_x = de_res.x
+
+    # Nelder-Mead polish at finer dt
+    print("Nelder-Mead polish on global best...")
+    nm_res = minimize(
+        lambda x: cost_wrapper(
+            x,
+            duration=refine_duration,
+            dt=refine_dt,
+            speed_tol=ORBIT_SPEED_TOL,
+            radial_tol=ORBIT_RADIAL_TOL,
+            alt_tol=ORBIT_ALT_TOL,
+        ),
+        best_x,
+        method="Nelder-Mead",
+        options={"maxiter": CFG.opt_nm_maxiter, "disp": False},
+    )
+    p_nm = vector_to_params(nm_res.x, bounds)
+    res_nm, log_nm = evaluate(p_nm, duration=refine_duration, dt=refine_dt, return_log=True)
+    results.append(res_nm)
+    if plot_each:
+        plot_trajectory(log_nm, f"trajectory_nm_best.png", TARGET_ORBIT_RADIUS)
+    if best_res is None or res_nm["cost"] < best_res["cost"]:
+        best_res = res_nm
+        best_params = p_nm
+        best_log = log_nm
 
     # Sort by cost
     results.sort(key=lambda r: r["cost"])
