@@ -110,8 +110,8 @@ def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
     )
     rocket = Rocket(
         stages=[booster_stage, upper_stage],
-        separation_delay=120.0,
-        upper_ignition_delay=120.0,
+        separation_delay=60.0,
+        upper_ignition_delay=60.0,
         separation_altitude_m=None,
         earth_radius=R_EARTH,
     )
@@ -142,7 +142,7 @@ def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
     return sim, state0, t_env0
 
 
-def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0, return_log: bool = False):
+def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, return_log: bool = False):
     sim, state0, t_env0 = build_simulation(params)
 
     # Replace throttle schedule for stage 2 (simple: constant throttle2 after ignition)
@@ -206,7 +206,7 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0, re
     if tw0 < 1.2:
         penalty += 1e6 * (1.2 - tw0)
 
-    # Stage coast enforcement: ensure no thrust during the 120 s after separation
+    # Stage coast enforcement: ensure no thrust during the 60 s after separation
     t_arr = np.array(log.t_sim)
     thrust_arr = np.array(log.thrust_mag)
     stage_arr = np.array(log.stage)
@@ -214,7 +214,7 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0, re
     coast_violation = False
     if len(idx_switch) > 0:
         t_switch = t_arr[idx_switch[0]]
-        mask = (t_arr >= t_switch) & (t_arr <= t_switch + 120.0)
+        mask = (t_arr >= t_switch) & (t_arr <= t_switch + 60.0)
         if thrust_arr[mask].size > 0 and (thrust_arr[mask] > 1e-3).any():
             penalty += 1e6
             coast_violation = True
@@ -305,7 +305,7 @@ def random_sample(n: int) -> list[SampleParams]:
     return samples
 
 
-def plot_trajectory(log, filename: str | None = None):
+def plot_trajectory(log, filename: str | None = None, target_radius: float | None = None):
     """Static 3D plot of trajectory; saves to file if filename provided."""
     positions = np.array(log.r)
     if positions.shape[0] < 2:
@@ -324,6 +324,12 @@ def plot_trajectory(log, filename: str | None = None):
     ax.plot_wireframe(x, y, z, color="lightblue", alpha=0.2, linewidth=0.3)
 
     ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], color="tab:red", lw=1.5, label="Trajectory")
+    if target_radius is not None:
+        theta = np.linspace(0, 2 * np.pi, 200)
+        circ_x = target_radius * np.cos(theta)
+        circ_y = target_radius * np.sin(theta)
+        circ_z = np.zeros_like(theta)
+        ax.plot(circ_x, circ_y, circ_z, "--", color="gray", alpha=0.6, label="Target orbit (equatorial)")
 
     r_max = max(np.linalg.norm(p) for p in positions)
     lim = 1.05 * max(R_EARTH, r_max)
@@ -348,16 +354,71 @@ def plot_trajectory(log, filename: str | None = None):
 
 
 def main():
-    n_samples = 20
-    duration = 1200.0
-    dt = 1.0
-    results = []
+    # Settings
+    n_random = 30
+    n_refine = 40
+    duration = 1500.0
+    dt = 0.2
+    plot_each = False  # set True to save every sample trajectory
 
-    for i, params in enumerate(random_sample(n_samples), start=1):
-        print(f"Running sample {i}/{n_samples}...")
+    results = []
+    best_res = None
+    best_params = None
+
+    # Initial random sweep
+    for i, params in enumerate(random_sample(n_random), start=1):
+        print(f"Random sample {i}/{n_random}...")
         res, log = evaluate(params, duration=duration, dt=dt, return_log=True)
         results.append(res)
-        plot_trajectory(log, f"trajectory_sample_{i}.png")
+        if plot_each:
+            plot_trajectory(log, f"trajectory_random_{i}.png", TARGET_ORBIT_RADIUS)
+        if best_res is None or res["cost"] < best_res["cost"]:
+            best_res = res
+            best_params = params
+
+    # Local refinement around the current best (Gaussian perturbations)
+    def clamp(val, lo, hi):
+        return max(lo, min(hi, val))
+
+    bounds = {
+        "prop1": (2.5e6, 3.6e6),
+        "prop2": (0.8e6, 1.4e6),
+        "throttle1": (0.8, 1.0),
+        "throttle2": (0.8, 1.0),
+        "pitch_start_alt": (3_000.0, 8_000.0),
+        "pitch_end_alt": (40_000.0, 120_000.0),
+    }
+
+    sigma = {
+        "prop1": 0.1e6,
+        "prop2": 0.05e6,
+        "throttle1": 0.05,
+        "throttle2": 0.05,
+        "pitch_start_alt": 500.0,
+        "pitch_end_alt": 5_000.0,
+    }
+
+    for j in range(1, n_refine + 1):
+        if best_params is None:
+            break
+        # Decay sigma over iterations
+        decay = max(0.2, 1.0 - j / n_refine)
+        new_params = SampleParams(
+            prop1=clamp(best_params.prop1 + np.random.randn() * sigma["prop1"] * decay, *bounds["prop1"]),
+            prop2=clamp(best_params.prop2 + np.random.randn() * sigma["prop2"] * decay, *bounds["prop2"]),
+            throttle1=clamp(best_params.throttle1 + np.random.randn() * sigma["throttle1"] * decay, *bounds["throttle1"]),
+            throttle2=clamp(best_params.throttle2 + np.random.randn() * sigma["throttle2"] * decay, *bounds["throttle2"]),
+            pitch_start_alt=clamp(best_params.pitch_start_alt + np.random.randn() * sigma["pitch_start_alt"] * decay, *bounds["pitch_start_alt"]),
+            pitch_end_alt=clamp(best_params.pitch_end_alt + np.random.randn() * sigma["pitch_end_alt"] * decay, *bounds["pitch_end_alt"]),
+        )
+        print(f"Refine sample {j}/{n_refine}...")
+        res, log = evaluate(new_params, duration=duration, dt=dt, return_log=True)
+        results.append(res)
+        if plot_each:
+            plot_trajectory(log, f"trajectory_refine_{j}.png", TARGET_ORBIT_RADIUS)
+        if best_res is None or res["cost"] < best_res["cost"]:
+            best_res = res
+            best_params = new_params
 
     # Sort by cost
     results.sort(key=lambda r: r["cost"])

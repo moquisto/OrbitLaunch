@@ -128,8 +128,8 @@ class Rocket:
         main_engine_ramp_time: float = 1.0,
         upper_engine_ramp_time: float = 1.0,
         meco_mach: float = 6.0,
-        separation_delay: float = 120.0,
-        upper_ignition_delay: float = 120.0,
+        separation_delay: float = 60.0,
+        upper_ignition_delay: float = 60.0,
         separation_altitude_m: Optional[float] = None,
         earth_radius: float = R_EARTH,
     ):
