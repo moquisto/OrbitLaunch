@@ -21,13 +21,14 @@ from simulation import Guidance, Simulation
 from config import CFG
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from typing import Tuple
 
 def simple_pitch_program(t: float, state: State) -> np.ndarray:
     """
     Gravity-turn inspired pitch:
     - <5 km: vertical
     - 5–60 km: blend from vertical toward downrange (east)
-    - >60 km: downrange / prograde if velocity is established
+    - >60 km: prograde if velocity is established, otherwise downrange
     """
     r = np.asarray(state.r_eci, dtype=float)
     v = np.asarray(state.v_eci, dtype=float)
@@ -59,6 +60,57 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
 def throttle_schedule(t: float, state: State) -> float:
     """Hold full throttle; adapt here if you want to throttle for max-Q, etc."""
     return 1.0
+
+
+class TwoPhaseUpperThrottle:
+    """
+    Simple two-phase upper-stage throttle: boost to target apoapsis, coast to
+    apoapsis, then circularize to raise perigee.
+    """
+
+    def __init__(self, target_radius: float):
+        self.target_radius = target_radius
+        self.phase = "boost"
+        self.target_ap = target_radius
+        self.transitions: list[tuple[str, float]] = [("boost", 0.0)]
+
+    def __call__(self, t: float, state: State) -> float:
+        stage_idx = getattr(state, "stage_index", 0)
+        if stage_idx == 0:
+            return 1.0  # booster always full throttle here
+
+        r = np.asarray(state.r_eci, dtype=float)
+        v = np.asarray(state.v_eci, dtype=float)
+        a, rp, ra = orbital_elements_from_state(r, v, MU_EARTH)
+        r_norm = np.linalg.norm(r)
+        vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
+
+        if self.phase == "boost":
+            if ra is not None and ra >= self.target_radius:
+                self.phase = "coast"
+                self.target_ap = ra
+                self.transitions.append(("coast", t))
+                return 0.0
+            return 1.0
+
+        if self.phase == "coast":
+            if ra is None:
+                return 0.0
+            # Coast until near apoapsis (radial velocity ~0 and radius near ra)
+            if abs(vr) < 2.0 and abs(r_norm - ra) < 1000.0:
+                self.phase = "circularize"
+                self.transitions.append(("circularize", t))
+                return 1.0
+            return 0.0
+
+        if self.phase == "circularize":
+            if rp is not None and rp >= self.target_radius - CFG.orbit_alt_tol:
+                self.phase = "done"
+                self.transitions.append(("done", t))
+                return 0.0
+            return 1.0
+
+        return 0.0
 
 
 def build_rocket() -> Rocket:
@@ -109,7 +161,16 @@ def build_simulation() -> tuple[Simulation, State, float]:
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
     guidance = Guidance(pitch_program=simple_pitch_program, throttle_schedule=throttle_schedule)
     integrator = RK4()
-    sim = Simulation(earth=earth, atmosphere=atmosphere, aerodynamics=aero, rocket=rocket, integrator=integrator, guidance=guidance)
+    sim = Simulation(
+        earth=earth,
+        atmosphere=atmosphere,
+        aerodynamics=aero,
+        rocket=rocket,
+        integrator=integrator,
+        guidance=guidance,
+        max_q_limit=CFG.max_q_limit,
+        max_accel_limit=CFG.max_accel_limit,
+    )
 
     # Initial state: surface at launch site, co-rotating atmosphere
     lat = np.deg2rad(CFG.launch_lat_deg)
@@ -136,6 +197,8 @@ def main():
     dt = CFG.main_dt_s
 
     orbit_radius = R_EARTH + CFG.target_orbit_alt_m  # ISS-like LEO target
+    controller = TwoPhaseUpperThrottle(target_radius=orbit_radius)
+    sim.guidance.throttle_schedule = controller
     log = sim.run(
         t_env0,
         duration,
@@ -156,6 +219,28 @@ def main():
     max_speed = max(log.speed)
     max_q = max(log.dynamic_pressure)
     stage_switch_times = [log.t_sim[i] for i in range(1, len(log.stage)) if log.stage[i] != log.stage[i - 1]]
+    # Basic orbital diagnostics from final state
+    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], MU_EARTH)
+    rp_alt_km = (rp - R_EARTH) / 1000.0 if rp is not None else None
+    ra_alt_km = (ra - R_EARTH) / 1000.0 if ra is not None else None
+    # Key event indices
+    idx_max_alt = int(np.argmax(log.altitude))
+    idx_max_speed = int(np.argmax(log.speed))
+    idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - (sim.rocket.stage_engine_off_complete_time[1] or log.t_sim[-1])))
+    def print_state(label: str, idx: int):
+        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], MU_EARTH)
+        rp_alt_i = (rp_i - R_EARTH) / 1000.0 if rp_i is not None else None
+        ra_alt_i = (ra_i - R_EARTH) / 1000.0 if ra_i is not None else None
+        rp_str = f"{rp_alt_i:.2f}" if rp_alt_i is not None else "n/a"
+        ra_str = f"{ra_alt_i:.2f}" if ra_alt_i is not None else "n/a"
+        print(
+            f"{label} @ t={log.t_sim[idx]:.1f}s: "
+            f"alt={log.altitude[idx]/1000:.2f} km, "
+            f"speed={log.speed[idx]:.1f} m/s, "
+            f"fpa={log.flight_path_angle_deg[idx]:.2f} deg, "
+            f"q={log.dynamic_pressure[idx]:.0f} Pa, "
+            f"rp={rp_str} km, ra={ra_str} km"
+        )
 
     print("\n=== Simulation summary ===")
     print(f"Steps: {len(log.t_sim)}")
@@ -168,14 +253,39 @@ def main():
     print(f"Max speed       : {max_speed:.1f} m/s")
     print(f"Max q           : {max_q:.1f} Pa")
     print(f"Stage switches  : {stage_switch_times}")
+    if a is not None:
+        print(f"Semi-major axis : {a/1000:.2f} km")
+    if rp_alt_km is not None and ra_alt_km is not None:
+        print(f"Perigee altitude: {rp_alt_km:.2f} km")
+        print(f"Apoapsis altitude: {ra_alt_km:.2f} km")
     if log.orbit_achieved:
         print("Orbit target met within tolerances.")
     else:
         print("Orbit target NOT met.")
+    print(f"Throttle controller phase: {controller.phase}")
+    print(f"Throttle controller transitions: {controller.transitions}")
+    # Stage fuel/engine timing diagnostics
+    booster_empty = sim.rocket.stage_fuel_empty_time[0]
+    upper_empty = sim.rocket.stage_fuel_empty_time[1]
+    booster_off = sim.rocket.stage_engine_off_complete_time[0]
+    upper_off = sim.rocket.stage_engine_off_complete_time[1]
+    if booster_empty is not None:
+        print(f"Booster fuel empty at t = {booster_empty:.1f} s")
+    if booster_off is not None:
+        print(f"Booster engine off at t = {booster_off:.1f} s")
+    if upper_empty is not None:
+        print(f"Upper fuel empty at t = {upper_empty:.1f} s")
+    if upper_off is not None:
+        print(f"Upper engine off at t = {upper_off:.1f} s")
+    print(f"Remaining prop (booster, upper): {sim.rocket.stage_prop_remaining}")
+    print_state("Max altitude", idx_max_alt)
+    print_state("Max speed", idx_max_speed)
+    print_state("Upper engine off", idx_upper_off)
 
     save_log_to_txt(log, "simulation_log.txt")
+    # Enable static trajectory plot; keep animation disabled for headless use.
     plot_trajectory_3d(log, R_EARTH)
-    animate_trajectory(log, R_EARTH)
+    # animate_trajectory(log, R_EARTH)
 
 
 def plot_trajectory_3d(log, r_earth: float):
@@ -273,6 +383,32 @@ def animate_trajectory(log, r_earth: float):
     ax.set_title("Trajectory Animation")
     plt.show()
 
+def orbital_elements_from_state(r_vec, v_vec, mu: float) -> Tuple[float | None, float | None, float | None]:
+    """Return semi-major axis and perigee/apoapsis radii for a two-body orbit."""
+    r = np.asarray(r_vec, dtype=float)
+    v = np.asarray(v_vec, dtype=float)
+    r_norm = np.linalg.norm(r)
+    v_norm = np.linalg.norm(v)
+    if r_norm == 0.0 or mu <= 0.0:
+        return None, None, None
+    # Specific mechanical energy
+    eps = 0.5 * v_norm**2 - mu / r_norm
+    if eps == 0.0:
+        return None, None, None
+    a = -mu / (2.0 * eps)
+    # Eccentricity vector
+    h_vec = np.cross(r, v)
+    h_norm_sq = np.dot(h_vec, h_vec)
+    if h_norm_sq == 0.0:
+        return a, None, None
+    e_vec = (np.cross(v, h_vec) / mu) - (r / r_norm)
+    e = np.linalg.norm(e_vec)
+    if e >= 1.0:
+        return a, None, None  # not a closed orbit
+    rp = a * (1.0 - e)
+    ra = a * (1.0 + e)
+    return a, rp, ra
+
 
 def save_log_to_txt(log, filename: str):
     """Write simulation states to a text (CSV-style) file for analysis."""
@@ -280,6 +416,7 @@ def save_log_to_txt(log, filename: str):
         f.write(
             "# t_sim_s,t_env_s,alt_m,speed_mps,mass_kg,stage,"
             "thrust_N,drag_N,mdot_kgps,q_Pa,rho_kgpm3,mach,"
+            "fpa_deg,v_vertical_mps,v_horizontal_mps,specific_energy_Jpkg,"
             "pos_x_m,pos_y_m,pos_z_m,vel_x_mps,vel_y_mps,vel_z_mps\n"
         )
         n = len(log.t_sim)
@@ -293,6 +430,7 @@ def save_log_to_txt(log, filename: str):
                 f"{log.thrust_mag[i]:.3f},{log.drag_mag[i]:.3f},"
                 f"{log.mdot[i]:.6f},{log.dynamic_pressure[i]:.3f},"
                 f"{log.rho[i]:.6e},{log.mach[i]:.3f},"
+                f"{log.flight_path_angle_deg[i]:.3f},{log.v_vertical[i]:.3f},{log.v_horizontal[i]:.3f},{log.specific_energy[i]:.3f},"
                 f"{r[0]:.3f},{r[1]:.3f},{r[2]:.3f},"
                 f"{v[0]:.3f},{v[1]:.3f},{v[2]:.3f}\n"
             )

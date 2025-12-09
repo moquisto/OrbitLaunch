@@ -83,6 +83,10 @@ class Logger:
         self.dynamic_pressure = []
         self.rho = []
         self.mach = []
+        self.flight_path_angle_deg = []
+        self.v_vertical = []
+        self.v_horizontal = []
+        self.specific_energy = []
         self.orbit_achieved = False
         self.cutoff_reason = ""
 
@@ -101,6 +105,10 @@ class Logger:
         self.dynamic_pressure.append(float(extras.get("dynamic_pressure", 0.0)))
         self.rho.append(float(extras.get("rho", 0.0)))
         self.mach.append(float(extras.get("mach", 0.0)))
+        self.flight_path_angle_deg.append(float(extras.get("fpa_deg", 0.0)))
+        self.v_vertical.append(float(extras.get("v_vertical", 0.0)))
+        self.v_horizontal.append(float(extras.get("v_horizontal", 0.0)))
+        self.specific_energy.append(float(extras.get("specific_energy", 0.0)))
 
 
 class Simulation:
@@ -112,6 +120,8 @@ class Simulation:
         rocket: Rocket,
         integrator: Optional[Integrator] = None,
         guidance: Optional[Guidance] = None,
+        max_q_limit: float | None = None,
+        max_accel_limit: float | None = None,
     ):
         self.earth = earth
         self.atmosphere = atmosphere
@@ -119,6 +129,8 @@ class Simulation:
         self.rocket = rocket
         self.integrator = integrator or RK4()
         self.guidance = guidance or Guidance()
+        self.max_q_limit = max_q_limit
+        self.max_accel_limit = max_accel_limit
 
     def _rhs(self, t_env: float, t_sim: float, state: State, control: ControlCommand):
         r = np.asarray(state.r_eci, dtype=float)
@@ -133,11 +145,21 @@ class Simulation:
         props = self.atmosphere.properties(altitude, t_env)
         p_amb = float(props.p)
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
+        # Dynamic pressure for limit handling (depends only on v_rel, not thrust)
+        v_atm = self.earth.atmosphere_velocity(r)
+        v_rel = v - v_atm
+        v_rel_mag = np.linalg.norm(v_rel)
+        rho = float(props.rho)
+        q = 0.5 * rho * v_rel_mag**2
+
+        throttle = control.throttle
+        if self.max_q_limit is not None and q > self.max_q_limit and q > 0.0:
+            throttle = float(np.clip(throttle * (self.max_q_limit / q), 0.0, 1.0))
 
         # Thrust + mass flow (rocket expects t, throttle, thrust_dir_eci)
         control_payload = {
             "t": t_sim,
-            "throttle": control.throttle,
+            "throttle": throttle,
             "thrust_dir_eci": control.thrust_direction,
         }
         F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(control_payload, state, p_amb)
@@ -145,21 +167,28 @@ class Simulation:
         # Accelerations
         a_drag = F_drag / mass
         a_thrust = F_thrust / mass
+        accel_mag = np.linalg.norm(a_grav + a_drag + a_thrust)
+        if self.max_accel_limit is not None and accel_mag > self.max_accel_limit and accel_mag > 0.0:
+            scale = self.max_accel_limit / accel_mag
+            F_thrust *= scale
+            a_thrust = F_thrust / mass
+            dm_dt *= scale
 
         dr_dt = v
         dv_dt = a_grav + a_drag + a_thrust
         dm_dt = float(dm_dt)
 
         # Diagnostics
-        v_atm = self.earth.atmosphere_velocity(r)
-        v_rel = v - v_atm
-        v_rel_mag = np.linalg.norm(v_rel)
-        rho = float(props.rho)
         gamma = 1.4
         R_air = 287.05
         a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
-        q = 0.5 * rho * v_rel_mag**2
+        v_norm = np.linalg.norm(v)
+        r_norm = np.linalg.norm(r)
+        vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
+        v_horiz = float(np.sqrt(max(v_norm**2 - vr**2, 0.0)))
+        fpa_deg = float(np.degrees(np.arctan2(vr, v_horiz))) if (v_horiz > 0 or vr != 0) else 0.0
+        specific_energy = 0.5 * v_norm**2 - self.earth.mu / r_norm if r_norm > 0 else 0.0
 
         extras = {
             "altitude": altitude,
@@ -170,6 +199,10 @@ class Simulation:
             "dynamic_pressure": q,
             "rho": rho,
             "mach": mach,
+            "fpa_deg": fpa_deg,
+            "v_vertical": vr,
+            "v_horizontal": v_horiz,
+            "specific_energy": specific_energy,
         }
 
         return dr_dt, dv_dt, dm_dt, extras
