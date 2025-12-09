@@ -15,6 +15,7 @@ from typing import Callable
 
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
 
 from aerodynamics import Aerodynamics, CdModel
 from atmosphere import AtmosphereModel
@@ -164,9 +165,10 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
         orbit_alt_tolerance=ORBIT_ALT_TOL,
     )
 
-    prop_used = (sim.rocket.stages[0].prop_mass + sim.rocket.stages[1].prop_mass) - (log.m[-1] - sim.rocket.stages[0].dry_mass - sim.rocket.stages[1].dry_mass)
-    prop_used = max(prop_used, 0.0)
-    total_prop = sim.rocket.stages[0].prop_mass + sim.rocket.stages[1].prop_mass
+    initial_prop = sim.rocket.stages[0].prop_mass + sim.rocket.stages[1].prop_mass
+    remaining_prop = sum(sim.rocket.stage_prop_remaining)
+    prop_used = max(initial_prop - remaining_prop, 0.0)
+    total_prop = initial_prop
 
     # Orbit evaluation using orbital elements
     r_vec = np.array(log.r[-1], dtype=float)
@@ -220,7 +222,7 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
             coast_violation = True
 
     # Circularization check at apogee (approximate two-burn plan)
-    prop_left = max(log.m[-1] - (sim.rocket.stages[0].dry_mass + sim.rocket.stages[1].dry_mass), 0.0)
+    prop_left = remaining_prop if remaining_prop > 0 else 0.0
     circularization_feasible = False
     delta_v_needed = float("nan")
     prop_needed_circ = float("nan")
@@ -292,6 +294,35 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 0.2, re
     return (result, log) if return_log else result
 
 
+# --- Parameter packing for optimizer ---
+def params_to_vector(p: SampleParams) -> np.ndarray:
+    return np.array(
+        [
+            p.prop1,
+            p.prop2,
+            p.throttle1,
+            p.throttle2,
+            p.pitch_start_alt,
+            p.pitch_end_alt,
+        ],
+        dtype=float,
+    )
+
+
+def vector_to_params(x: np.ndarray, bounds: dict) -> SampleParams:
+    def clamp(val, lo, hi):
+        return max(lo, min(hi, val))
+
+    return SampleParams(
+        prop1=clamp(x[0], *bounds["prop1"]),
+        prop2=clamp(x[1], *bounds["prop2"]),
+        throttle1=clamp(x[2], *bounds["throttle1"]),
+        throttle2=clamp(x[3], *bounds["throttle2"]),
+        pitch_start_alt=clamp(x[4], *bounds["pitch_start_alt"]),
+        pitch_end_alt=clamp(x[5], *bounds["pitch_end_alt"]),
+    )
+
+
 def random_sample(n: int) -> list[SampleParams]:
     samples = []
     for _ in range(n):
@@ -354,31 +385,15 @@ def plot_trajectory(log, filename: str | None = None, target_radius: float | Non
 
 
 def main():
-    # Settings
-    n_random = 30
-    n_refine = 40
-    duration = 1500.0
-    dt = 0.2
+    # Settings: coarse sweep then local refinement with Nelder-Mead
+    n_random = 15  # random seeds
+    n_heuristic = 15  # heuristic seeds
+    top_k = 3
+    coarse_duration = 800.0
+    coarse_dt = 1.0
+    refine_duration = 1200.0
+    refine_dt = 0.2
     plot_each = False  # set True to save every sample trajectory
-
-    results = []
-    best_res = None
-    best_params = None
-
-    # Initial random sweep
-    for i, params in enumerate(random_sample(n_random), start=1):
-        print(f"Random sample {i}/{n_random}...")
-        res, log = evaluate(params, duration=duration, dt=dt, return_log=True)
-        results.append(res)
-        if plot_each:
-            plot_trajectory(log, f"trajectory_random_{i}.png", TARGET_ORBIT_RADIUS)
-        if best_res is None or res["cost"] < best_res["cost"]:
-            best_res = res
-            best_params = params
-
-    # Local refinement around the current best (Gaussian perturbations)
-    def clamp(val, lo, hi):
-        return max(lo, min(hi, val))
 
     bounds = {
         "prop1": (2.5e6, 3.6e6),
@@ -389,36 +404,68 @@ def main():
         "pitch_end_alt": (40_000.0, 120_000.0),
     }
 
-    sigma = {
-        "prop1": 0.1e6,
-        "prop2": 0.05e6,
-        "throttle1": 0.05,
-        "throttle2": 0.05,
-        "pitch_start_alt": 500.0,
-        "pitch_end_alt": 5_000.0,
-    }
+    results = []
+    best_res = None
+    best_params = None
+    best_log = None
 
-    for j in range(1, n_refine + 1):
-        if best_params is None:
-            break
-        # Decay sigma over iterations
-        decay = max(0.2, 1.0 - j / n_refine)
-        new_params = SampleParams(
-            prop1=clamp(best_params.prop1 + np.random.randn() * sigma["prop1"] * decay, *bounds["prop1"]),
-            prop2=clamp(best_params.prop2 + np.random.randn() * sigma["prop2"] * decay, *bounds["prop2"]),
-            throttle1=clamp(best_params.throttle1 + np.random.randn() * sigma["throttle1"] * decay, *bounds["throttle1"]),
-            throttle2=clamp(best_params.throttle2 + np.random.randn() * sigma["throttle2"] * decay, *bounds["throttle2"]),
-            pitch_start_alt=clamp(best_params.pitch_start_alt + np.random.randn() * sigma["pitch_start_alt"] * decay, *bounds["pitch_start_alt"]),
-            pitch_end_alt=clamp(best_params.pitch_end_alt + np.random.randn() * sigma["pitch_end_alt"] * decay, *bounds["pitch_end_alt"]),
+    # Initial seeds
+    seeds = random_sample(n_random)
+    heuristic = []
+    for _ in range(n_heuristic):
+        heuristic.append(
+            SampleParams(
+                prop1=3.1e6,
+                prop2=1.1e6,
+                throttle1=0.95,
+                throttle2=0.95,
+                pitch_start_alt=5000.0,
+                pitch_end_alt=70000.0,
+            )
         )
-        print(f"Refine sample {j}/{n_refine}...")
-        res, log = evaluate(new_params, duration=duration, dt=dt, return_log=True)
+    seeds.extend(heuristic)
+
+    seed_results = []
+    for i, params in enumerate(seeds, start=1):
+        print(f"Seed {i}/{len(seeds)} (dt={coarse_dt})...")
+        res, log = evaluate(params, duration=coarse_duration, dt=coarse_dt, return_log=True)
+        seed_results.append((res, params, log))
         results.append(res)
         if plot_each:
-            plot_trajectory(log, f"trajectory_refine_{j}.png", TARGET_ORBIT_RADIUS)
+            plot_trajectory(log, f"trajectory_seed_{i}.png", TARGET_ORBIT_RADIUS)
         if best_res is None or res["cost"] < best_res["cost"]:
             best_res = res
-            best_params = new_params
+            best_params = params
+            best_log = log
+
+    # Select top_k seeds
+    seed_results.sort(key=lambda t: t[0]["cost"])
+    top_seeds = seed_results[: min(top_k, len(seed_results))]
+
+    # Local Nelder-Mead refinement on each top seed (coarse dt for speed)
+    def cost_wrapper(x):
+        p = vector_to_params(x, bounds)
+        res = evaluate(p, duration=coarse_duration, dt=coarse_dt, return_log=False)
+        return res["cost"]
+
+    for idx, (res0, p0, _) in enumerate(top_seeds, start=1):
+        x0 = params_to_vector(p0)
+        print(f"Nelder-Mead refine seed {idx}/{len(top_seeds)}...")
+        nm_res = minimize(
+            cost_wrapper,
+            x0,
+            method="Nelder-Mead",
+            options={"maxiter": 60, "disp": False},
+        )
+        p_nm = vector_to_params(nm_res.x, bounds)
+        res_nm, log_nm = evaluate(p_nm, duration=refine_duration, dt=refine_dt, return_log=True)
+        results.append(res_nm)
+        if plot_each:
+            plot_trajectory(log_nm, f"trajectory_nm_{idx}.png", TARGET_ORBIT_RADIUS)
+        if best_res is None or res_nm["cost"] < best_res["cost"]:
+            best_res = res_nm
+            best_params = p_nm
+            best_log = log_nm
 
     # Sort by cost
     results.sort(key=lambda r: r["cost"])
@@ -437,6 +484,10 @@ def main():
             print(f"  {k}: {v}")
     else:
         print("No results.")
+
+    # Plot final best trajectory
+    if best_log is not None:
+        plot_trajectory(best_log, "trajectory_best.png", TARGET_ORBIT_RADIUS)
 
 
 if __name__ == "__main__":

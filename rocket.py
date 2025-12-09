@@ -128,8 +128,8 @@ class Rocket:
         main_engine_ramp_time: float = 1.0,
         upper_engine_ramp_time: float = 1.0,
         meco_mach: float = 6.0,
-        separation_delay: float = 60.0,
-        upper_ignition_delay: float = 60.0,
+        separation_delay: float = 30.0,
+        upper_ignition_delay: float = 30.0,
         separation_altitude_m: Optional[float] = None,
         earth_radius: float = R_EARTH,
     ):
@@ -242,15 +242,14 @@ class Rocket:
         # Shape function for throttle based on stage, fuel and the requested timeline:
         # Stage 1 (index 0):
         #   - 1 s linear ramp-up from t=0 to full thrust
-        #   - then full thrust until fuel for stage 1 is exhausted
-        #   - then 1 s linear ramp-down to zero
-        #   - then engine off forever
-        #   - 60 s after engine-off: stage separation is "allowed"
-        #   - 60 s after separation: stage 2 ignition may begin
+        #   - full thrust until fuel exhausted
+        #   - 1 s linear ramp-down to zero
+        #   - coast for separation_delay, then stage separation allowed
         # Stage 2 (index 1):
-        #   - 1 s linear ramp-up from upper_ignition_start_time
-        #   - then full thrust until fuel exhausted
-        #   - then 1 s linear ramp-down and engine off.
+        #   - ignite after upper_ignition_start_time (= separation_time + upper_ignition_delay)
+        #   - 1 s linear ramp-up to commanded thrust
+        #   - full thrust until fuel exhausted
+        #   - 1 s linear ramp-down to zero
         shape = 0.0
 
         if stage_idx == 0:
