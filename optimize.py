@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 from aerodynamics import Aerodynamics, CdModel
 from atmosphere import AtmosphereModel
@@ -141,7 +142,7 @@ def build_simulation(params: SampleParams) -> tuple[Simulation, State, float]:
     return sim, state0, t_env0
 
 
-def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0):
+def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0, return_log: bool = False):
     sim, state0, t_env0 = build_simulation(params)
 
     # Replace throttle schedule for stage 2 (simple: constant throttle2 after ignition)
@@ -288,7 +289,7 @@ def evaluate(params: SampleParams, duration: float = 1200.0, dt: float = 1.0):
         "coast_violation": coast_violation,
         "total_prop": total_prop,
     }
-    return result
+    return (result, log) if return_log else result
 
 
 def random_sample(n: int) -> list[SampleParams]:
@@ -304,6 +305,48 @@ def random_sample(n: int) -> list[SampleParams]:
     return samples
 
 
+def plot_trajectory(log, filename: str | None = None):
+    """Static 3D plot of trajectory; saves to file if filename provided."""
+    positions = np.array(log.r)
+    if positions.shape[0] < 2:
+        return
+
+    fig = plt.figure(figsize=(7, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Earth sphere
+    u = np.linspace(0, 2 * np.pi, 60)
+    v = np.linspace(0, np.pi, 30)
+    x = R_EARTH * np.outer(np.cos(u), np.sin(v))
+    y = R_EARTH * np.outer(np.sin(u), np.sin(v))
+    z = R_EARTH * np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_surface(x, y, z, cmap="Blues", alpha=0.08, linewidth=0, antialiased=False)
+    ax.plot_wireframe(x, y, z, color="lightblue", alpha=0.2, linewidth=0.3)
+
+    ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], color="tab:red", lw=1.5, label="Trajectory")
+
+    r_max = max(np.linalg.norm(p) for p in positions)
+    lim = 1.05 * max(R_EARTH, r_max)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_zlim(-lim, lim)
+    ax.set_box_aspect((1, 1, 1))
+    ax.view_init(elev=25, azim=35)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_zlabel("z [m]")
+    ax.set_title("Trajectory")
+    ax.legend(loc="upper right")
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150)
+        plt.close(fig)
+        print(f"Saved trajectory plot to {filename}")
+    else:
+        plt.show()
+
+
 def main():
     n_samples = 20
     duration = 1200.0
@@ -312,8 +355,9 @@ def main():
 
     for i, params in enumerate(random_sample(n_samples), start=1):
         print(f"Running sample {i}/{n_samples}...")
-        res = evaluate(params, duration=duration, dt=dt)
+        res, log = evaluate(params, duration=duration, dt=dt, return_log=True)
         results.append(res)
+        plot_trajectory(log, f"trajectory_sample_{i}.png")
 
     # Sort by cost
     results.sort(key=lambda r: r["cost"])
