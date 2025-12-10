@@ -84,6 +84,7 @@ class RK4(Integrator):
         # Combine increments
         r_next = state.r_eci + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
         v_next = state.v_eci + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
+        m_next = state.m + (dt / 6.0) * (k1_m + 2.0 * k2_m + 2.0 * k3_m + k4_m)
         return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index, upper_ignition_start_time=state.upper_ignition_start_time)
 
 

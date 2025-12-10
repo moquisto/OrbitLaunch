@@ -78,12 +78,14 @@ class Config:
     #    The function/class is specified by an import string.
 
     # Pitch Guidance
-    pitch_guidance_mode: str = "function"  # 'parameterized' or 'function'
+    pitch_guidance_mode: str = "parameterized"  # 'parameterized' or 'function'
     pitch_guidance_function: str = "custom_guidance.simple_pitch_program"
     pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [5_000.0, 90.0],  # Start turn at 5km alt, vehicle is vertical (90 deg)
-            [60_000.0, 5.0],  # End turn at 60km alt, vehicle is pitched 5 deg
+            [0.0, 88.0],   # Start almost vertical
+            [10_000.0, 80.0], # 80 deg at 10km
+            [30_000.0, 45.0], # 45 deg at 30km
+            [80_000.0, 0.0],  # Horizontal at 80km
         ]
     )
     pitch_prograde_speed_threshold: float = 100.0  # [m/s] speed needed to align with velocity
@@ -113,14 +115,17 @@ class Config:
     )
 
     # Throttle Guidance
-    throttle_guidance_mode: str = "function"  # 'parameterized' or 'function'
+    throttle_guidance_mode: str = "parameterized"  # 'parameterized' or 'function'
     throttle_guidance_function_class: str = "custom_guidance.TwoPhaseUpperThrottle"
     upper_stage_throttle_program: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 1.0],    # Full throttle from ignition
-            [200.0, 0.0],  # Cutoff and coast
-            [500.0, 1.0],  # Circularization burn
-            [600.0, 0.0],  # Final cutoff
+            [100.0, 1.0],  # Continue full throttle for 100s
+            [101.0, 0.0],  # Cutoff
+            [2500.0, 0.0], # Coast until 2500s (relative to upper stage ignition)
+            [2501.0, 1.0], # Re-ignite for circularization
+            [2600.0, 1.0], # Burn for 100s
+            [2601.0, 0.0], # Final cutoff
         ]
     )
     # Tolerances for the original TwoPhaseUpperThrottle function

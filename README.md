@@ -19,6 +19,7 @@ If you later draw a 2D cross-section of the orbit, the circular path will appear
 All simulation parameters, including vehicle properties, target orbit, guidance parameters, and physical constants, can be modified in the `config.py` file.
 
 ## Simplifications (v1)
+To enable a focused study on rocket guidance and orbital mechanics, and to manage computational complexity, several simplifications have been made in this simulation. These choices allow for faster iteration and highlight the core physics relevant to achieving orbit, rather than getting bogged down in minute details. The primary goal is to provide a robust framework for testing guidance profiles and optimization strategies.
 
 Environment and gravity  
 1. Spherical Earth with central gravity. J2 perturbation can be enabled.
