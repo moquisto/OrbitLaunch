@@ -26,11 +26,11 @@ class Config:
     booster_thrust_sl: float = 7.6e7
     booster_isp_vac: float = 380.0
     booster_isp_sl: float = 330.0
-    booster_dry_mass: float = 1.2e5    # ~275 t dry
+    booster_dry_mass: float = 1.8e5    # ~180 t dry
     booster_prop_mass: float = 3.4e6    # ~3400 t prop
 
     upper_thrust_vac: float = 1.5e7
-    upper_thrust_sl: float = 1.35e7
+    upper_thrust_sl: float = 6.78e6
     upper_isp_vac: float = 380.0
     upper_isp_sl: float = 330.0
     upper_dry_mass: float = 0.8e5       # ~100 t dry
