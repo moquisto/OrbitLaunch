@@ -11,13 +11,8 @@ from typing import List, Tuple, Optional
 
 import numpy as np
 from gravity import R_EARTH
+from config import CFG
 
-# -------------------------------
-# Physical constants
-# -------------------------------
-G0 = 9.80665  # [m/s^2] standard gravity for Isp conversion
-P_SL = 101325.0  # [Pa] reference sea-level pressure
-A0 = 340.0  # [m/s] reference speed of sound used for Mach estimate
 
 
 @dataclass
@@ -54,9 +49,9 @@ class Engine:
         throttle = float(np.clip(throttle, 0.0, 1.0))
 
         # Clamp ambient pressure to [0, P_SL] for interpolation
-        p = float(np.clip(p_amb, 0.0, P_SL))
+        p = float(np.clip(p_amb, 0.0, CFG.P_SL))
         # Fraction of "vacuum-ness": 0 at sea level, 1 in vacuum
-        f_vac = 1.0 - p / P_SL
+        f_vac = 1.0 - p / CFG.P_SL
 
         thrust_nominal = self.thrust_sl + f_vac * (self.thrust_vac - self.thrust_sl)
         isp_nominal = self.isp_sl + f_vac * (self.isp_vac - self.isp_sl)
@@ -137,7 +132,7 @@ class Rocket:
         min_throttle: float = 0.0,
         shutdown_ramp_time: float = 1.0,
         throttle_shape_full_threshold: float = 0.99,
-        mach_ref_speed: float = A0,
+        mach_ref_speed: float | None = None,
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
@@ -153,7 +148,7 @@ class Rocket:
         self.min_throttle = float(np.clip(min_throttle, 0.0, 1.0))
         self.shutdown_ramp_time = float(max(shutdown_ramp_time, 0.0))
         self.throttle_shape_full_threshold = float(np.clip(throttle_shape_full_threshold, 0.0, 1.0))
-        self.mach_ref_speed = float(mach_ref_speed)
+        self.mach_ref_speed = float(mach_ref_speed) if mach_ref_speed is not None else CFG.mach_reference_speed
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -379,7 +374,7 @@ class Rocket:
 
         # Mass flow: thrust = Isp * g0 * |dm_dt|
         if thrust_mag > 0.0 and isp > 0.0:
-            dm_dt = -thrust_mag / (isp * G0)
+            dm_dt = -thrust_mag / (isp * CFG.G0)
         else:
             dm_dt = 0.0
 
@@ -530,8 +525,8 @@ if __name__ == "__main__":
     # Environment and simulation setup
     # -----------------------------
     # Simple point-mass Earth
-    R_E = 6371000.0           # m
-    MU_E = 3.986004418e14     # m^3/s^2
+    R_E = CFG.earth_radius_m
+    MU_E = CFG.earth_mu
 
     atm = AtmosphereModel()
 
@@ -563,7 +558,7 @@ if __name__ == "__main__":
         r_norm = float(np.linalg.norm(r_vec))
         alt = max(0.0, r_norm - R_E)
         speed = float(np.linalg.norm(v_vec))
-        mach = speed / A0 if A0 > 0.0 else 0.0
+        mach = speed / CFG.mach_reference_speed if CFG.mach_reference_speed > 0.0 else 0.0
 
         # Ambient pressure from the atmosphere model
         props = atm.properties(alt, t)

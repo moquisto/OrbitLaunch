@@ -373,6 +373,7 @@ class Simulation:
                     # preserve it; otherwise start counting from separation plus the ignition delay.
                     if self.rocket.upper_ignition_start_time is None:
                         self.rocket.upper_ignition_start_time = t_sim + self.rocket.upper_ignition_delay
+                    state.upper_ignition_start_time = self.rocket.upper_ignition_start_time
 
             t_sim += dt
             t_env += dt

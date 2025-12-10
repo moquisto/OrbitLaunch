@@ -10,10 +10,12 @@ and mass numbers for a lightweight demo.
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import numpy as np
 
 from aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
 from atmosphere import AtmosphereModel
+from custom_guidance import orbital_elements_from_state
 from gravity import EarthModel
 from integrators import RK4, VelocityVerlet, State
 from rocket import Engine, Rocket, Stage
@@ -24,38 +26,54 @@ from matplotlib import animation
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from typing import Tuple
 
-def simple_pitch_program(t: float, state: State) -> np.ndarray:
+class ParameterizedPitchProgram:
     """
-    Gravity-turn inspired pitch:
-    Uses start/end altitudes from config.
+    Interpolates a pitch angle schedule based on altitude.
+    The schedule is defined as a list of [altitude_m, angle_deg] pairs.
+    - Angle is degrees from the local horizontal (0=horizontal, 90=vertical).
+    - Below the first altitude point, the first angle is held.
+    - Above the last altitude point, transitions to prograde guidance.
     """
-    r = np.asarray(state.r_eci, dtype=float)
-    v = np.asarray(state.v_eci, dtype=float)
-    r_norm = np.linalg.norm(r)
-    if r_norm == 0.0:
-        return np.array([0.0, 0.0, 1.0], dtype=float)
-    r_hat = r / r_norm
 
-    east = np.cross([0.0, 0.0, 1.0], r_hat)
-    east_norm = np.linalg.norm(east)
-    east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
+    def __init__(self, schedule: list[list[float]], prograde_threshold: float, earth_radius: float):
+        # Sort schedule by altitude
+        self.schedule = sorted(schedule, key=lambda p: p[0])
+        self.prograde_threshold = prograde_threshold
+        self.earth_radius = earth_radius
+        self.alt_points = np.array([p[0] for p in self.schedule])
+        self.angle_points_rad = np.deg2rad([p[1] for p in self.schedule])
 
-    alt = r_norm - CFG.earth_radius_m
-    start = CFG.pitch_turn_start_m
-    end = CFG.pitch_turn_end_m
-    if alt < start:
-        return r_hat
-    elif alt < end:
-        w = (alt - start) / max(end - start, 1.0)
-        direction = (1.0 - w) * r_hat + w * east
-    else:
-        speed = np.linalg.norm(v)
-        if speed > CFG.pitch_prograde_speed_threshold:
-            direction = v / speed  # prograde
+    def __call__(self, t: float, state: State) -> np.ndarray:
+        r = np.asarray(state.r_eci, dtype=float)
+        v = np.asarray(state.v_eci, dtype=float)
+        r_norm = np.linalg.norm(r)
+        if r_norm == 0.0:
+            return np.array([0.0, 0.0, 1.0], dtype=float)
+        r_hat = r / r_norm
+
+        # Define local orientation vectors (up, east)
+        east = np.cross([0.0, 0.0, 1.0], r_hat)
+        east_norm = np.linalg.norm(east)
+        east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
+
+        alt = r_norm - self.earth_radius
+        final_alt = self.alt_points[-1]
+
+        if alt > final_alt:
+            # Above pitch program, go prograde if fast enough
+            speed = np.linalg.norm(v)
+            if speed > self.prograde_threshold:
+                direction = v / speed
+            else:
+                # If speed is low, point horizontally
+                direction = east
         else:
-            direction = east
-    n = np.linalg.norm(direction)
-    return direction / n if n > 0.0 else r_hat
+            # Interpolate angle from schedule
+            pitch_rad = np.interp(alt, self.alt_points, self.angle_points_rad)
+            direction = np.cos(pitch_rad) * east + np.sin(pitch_rad) * r_hat
+
+        n = np.linalg.norm(direction)
+        return direction / n if n > 0.0 else r_hat
 
 
 def throttle_schedule(t: float, state: State) -> float:
@@ -63,56 +81,35 @@ def throttle_schedule(t: float, state: State) -> float:
     return CFG.base_throttle_cmd
 
 
-class TwoPhaseUpperThrottle:
+class ParameterizedThrottleProgram:
     """
-    Simple two-phase upper-stage throttle: boost to target apoapsis, coast to
-    apoapsis, then circularize to raise perigee.
+    Interpolates a throttle schedule for the upper stage based on time since
+    ignition. The schedule is a list of [time_sec, throttle_level] pairs.
     """
 
-    def __init__(self, target_radius: float, mu: float):
-        self.target_radius = target_radius
-        self.mu = mu
-        self.phase = "boost"
-        self.target_ap = target_radius
-        self.transitions: list[tuple[str, float]] = [("boost", 0.0)]
+    def __init__(self, schedule: list[list[float]]):
+        self.schedule = sorted(schedule, key=lambda p: p[0])
+        self.time_points = np.array([p[0] for p in self.schedule])
+        self.throttle_points = np.array([p[1] for p in self.schedule])
 
     def __call__(self, t: float, state: State) -> float:
         stage_idx = getattr(state, "stage_index", 0)
         if stage_idx == 0:
-            return 1.0  # booster always full throttle here
+            return 1.0  # Booster always full throttle
 
-        r = np.asarray(state.r_eci, dtype=float)
-        v = np.asarray(state.v_eci, dtype=float)
-        a, rp, ra = orbital_elements_from_state(r, v, self.mu)
-        r_norm = np.linalg.norm(r)
-        vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
+        ignition_time = getattr(state, "upper_ignition_start_time", None)
+        if ignition_time is None:
+            return 0.0  # Not yet ignited
 
-        if self.phase == "boost":
-            if ra is not None and ra >= self.target_radius:
-                self.phase = "coast"
-                self.target_ap = ra
-                self.transitions.append(("coast", t))
-                return 0.0
-            return 1.0
-
-        if self.phase == "coast":
-            if ra is None:
-                return 0.0
-            # Coast until near apoapsis (radial velocity ~0 and radius near ra)
-            if abs(vr) < CFG.upper_throttle_vr_tolerance and abs(r_norm - ra) < CFG.upper_throttle_alt_tolerance:
-                self.phase = "circularize"
-                self.transitions.append(("circularize", t))
-                return 1.0
+        time_since_ignition = t - ignition_time
+        if time_since_ignition < 0:
             return 0.0
 
-        if self.phase == "circularize":
-            if rp is not None and rp >= self.target_radius - CFG.orbit_alt_tol:
-                self.phase = "done"
-                self.transitions.append(("done", t))
-                return 0.0
-            return 1.0
-
-        return 0.0
+        # Interpolate throttle level from the schedule
+        throttle = np.interp(
+            time_since_ignition, self.time_points, self.throttle_points, left=0.0, right=0.0
+        )
+        return float(throttle)
 
 
 def build_rocket() -> Rocket:
@@ -177,7 +174,24 @@ def build_simulation() -> tuple[Simulation, State, float]:
     cd_model = CdModel(mach_dependent_cd)
     rocket = build_rocket()
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
-    guidance = Guidance(pitch_program=simple_pitch_program, throttle_schedule=throttle_schedule)
+    # --- Pitch Program Selection ---
+    if CFG.pitch_guidance_mode == 'parameterized':
+        pitch_program = ParameterizedPitchProgram(
+            schedule=CFG.pitch_program,
+            prograde_threshold=CFG.pitch_prograde_speed_threshold,
+            earth_radius=CFG.earth_radius_m,
+        )
+    elif CFG.pitch_guidance_mode == 'function':
+        try:
+            module_name, func_name = CFG.pitch_guidance_function.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            pitch_program = getattr(module, func_name)
+        except (ImportError, AttributeError, ValueError) as e:
+            raise ImportError(f"Could not load pitch guidance function '{CFG.pitch_guidance_function}': {e}")
+    else:
+        raise ValueError(f"Unknown pitch_guidance_mode: '{CFG.pitch_guidance_mode}'")
+
+    guidance = Guidance(pitch_program=pitch_program, throttle_schedule=throttle_schedule)
     integrator_name = str(getattr(CFG, "integrator", "rk4")).lower()
     if integrator_name in ("rk4", "runge-kutta", "rk"):
         integrator = RK4()
@@ -222,8 +236,22 @@ def main():
     duration = CFG.main_duration_s
     dt = CFG.main_dt_s
 
-    orbit_radius = CFG.earth_radius_m + CFG.target_orbit_alt_m  # ISS-like LEO target
-    controller = TwoPhaseUpperThrottle(target_radius=orbit_radius, mu=CFG.earth_mu)
+    # --- Throttle Controller Selection ---
+    orbit_radius = CFG.earth_radius_m + CFG.target_orbit_alt_m
+    if CFG.throttle_guidance_mode == 'parameterized':
+        controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
+    elif CFG.throttle_guidance_mode == 'function':
+        try:
+            module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            ControllerClass = getattr(module, class_name)
+            # The original controller class requires target_radius and mu
+            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+        except (ImportError, AttributeError, ValueError) as e:
+            raise ImportError(f"Could not load throttle guidance class '{CFG.throttle_guidance_function_class}': {e}")
+    else:
+        raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+
     sim.guidance.throttle_schedule = controller
     log = sim.run(
         t_env0,
@@ -291,8 +319,6 @@ def main():
         print("Orbit target met within tolerances.")
     else:
         print("Orbit target NOT met.")
-    print(f"Throttle controller phase: {controller.phase}")
-    print(f"Throttle controller transitions: {controller.transitions}")
     # Stage fuel/engine timing diagnostics
     booster_empty = sim.rocket.stage_fuel_empty_time[0]
     upper_empty = sim.rocket.stage_fuel_empty_time[1]
@@ -422,31 +448,6 @@ def animate_trajectory(log, r_earth: float):
     ax.set_title("Trajectory Animation")
     plt.show()
 
-def orbital_elements_from_state(r_vec, v_vec, mu: float) -> Tuple[float | None, float | None, float | None]:
-    """Return semi-major axis and perigee/apoapsis radii for a two-body orbit."""
-    r = np.asarray(r_vec, dtype=float)
-    v = np.asarray(v_vec, dtype=float)
-    r_norm = np.linalg.norm(r)
-    v_norm = np.linalg.norm(v)
-    if r_norm == 0.0 or mu <= 0.0:
-        return None, None, None
-    # Specific mechanical energy
-    eps = 0.5 * v_norm**2 - mu / r_norm
-    if eps == 0.0:
-        return None, None, None
-    a = -mu / (2.0 * eps)
-    # Eccentricity vector
-    h_vec = np.cross(r, v)
-    h_norm_sq = np.dot(h_vec, h_vec)
-    if h_norm_sq == 0.0:
-        return a, None, None
-    e_vec = (np.cross(v, h_vec) / mu) - (r / r_norm)
-    e = np.linalg.norm(e_vec)
-    if e >= 1.0:
-        return a, None, None  # not a closed orbit
-    rp = a * (1.0 - e)
-    ra = a * (1.0 + e)
-    return a, rp, ra
 
 
 def save_log_to_txt(log, filename: str):

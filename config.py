@@ -70,10 +70,23 @@ class Config:
     max_q_limit: float | None = 3e5  # set to a Pa value to penalize exceeding
     max_accel_limit: float | None = 40.0  # set to m/s^2 to penalize exceeding
 
-    # Pitch program shape
-    pitch_turn_start_m: float = 5_000.0
-    pitch_turn_end_m: float = 60_000.0
-    pitch_prograde_speed_threshold: float = 1.0  # [m/s] speed needed to align with velocity
+    # --- Guidance ---
+    # The guidance for both pitch and throttle can be specified in one of two ways:
+    # 1. 'parameterized': A simple, data-driven program defined by a list of points.
+    #    This is useful for optimization.
+    # 2. 'function': A custom Python function or class that contains more complex logic.
+    #    The function/class is specified by an import string.
+
+    # Pitch Guidance
+    pitch_guidance_mode: str = "function"  # 'parameterized' or 'function'
+    pitch_guidance_function: str = "custom_guidance.simple_pitch_program"
+    pitch_program: list = dataclasses.field(
+        default_factory=lambda: [
+            [5_000.0, 90.0],  # Start turn at 5km alt, vehicle is vertical (90 deg)
+            [60_000.0, 5.0],  # End turn at 60km alt, vehicle is pitched 5 deg
+        ]
+    )
+    pitch_prograde_speed_threshold: float = 100.0  # [m/s] speed needed to align with velocity
 
     # Atmosphere
     atmosphere_switch_alt_m: float = 86_000.0
@@ -83,10 +96,13 @@ class Config:
     use_jet_stream_model: bool = True
 
     # Physics
+    G0: float = 9.80665  # [m/s^2] standard gravity for Isp conversion
+    P_SL: float = 101325.0  # [Pa] reference sea-level pressure
     air_gamma: float = 1.4
     air_gas_constant: float = 287.05  # J/(kg*K)
 
     # Aerodynamics
+    wind_direction_vec: tuple[float, float, float] = (1.0, 0.0, 0.0) # From East
     wind_alt_points: list = dataclasses.field(default_factory=lambda: [8_000.0, 10_500.0, 13_000.0])
     wind_speed_points: list = dataclasses.field(default_factory=lambda: [0.0, 50.0, 0.0])
     mach_cd_map: list = dataclasses.field(
@@ -96,10 +112,23 @@ class Config:
         ]
     )
 
-    # Guidance
+    # Throttle Guidance
+    throttle_guidance_mode: str = "function"  # 'parameterized' or 'function'
+    throttle_guidance_function_class: str = "custom_guidance.TwoPhaseUpperThrottle"
+    upper_stage_throttle_program: list = dataclasses.field(
+        default_factory=lambda: [
+            [0.0, 1.0],    # Full throttle from ignition
+            [200.0, 0.0],  # Cutoff and coast
+            [500.0, 1.0],  # Circularization burn
+            [600.0, 0.0],  # Final cutoff
+        ]
+    )
+    # Tolerances for the original TwoPhaseUpperThrottle function
     upper_throttle_vr_tolerance: float = 2.0
     upper_throttle_alt_tolerance: float = 1000.0
     base_throttle_cmd: float = 1.0  # default throttle for simple schedule
+
+
 
     # Termination logic
     impact_altitude_buffer_m: float = -100.0  # stop after sinking below this altitude

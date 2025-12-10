@@ -17,6 +17,7 @@ class State:
     v_eci: np.ndarray
     m: float
     stage_index: int = 0
+    upper_ignition_start_time: float | None = None
 
     def copy(self) -> "State":
         """
@@ -30,6 +31,7 @@ class State:
             v_eci=self.v_eci.copy(),
             m=self.m,
             stage_index=self.stage_index,
+            upper_ignition_start_time=self.upper_ignition_start_time,
         )
 
 
@@ -82,9 +84,7 @@ class RK4(Integrator):
         # Combine increments
         r_next = state.r_eci + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
         v_next = state.v_eci + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
-        m_next = state.m + (dt / 6.0) * (k1_m + 2.0 * k2_m + 2.0 * k3_m + k4_m)
-
-        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index)
+        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index, upper_ignition_start_time=state.upper_ignition_start_time)
 
 
 class VelocityVerlet(Integrator):
@@ -144,7 +144,7 @@ class VelocityVerlet(Integrator):
         # Correct velocity with average acceleration
         v_next = v_n + 0.5 * (a_n + a_np1) * dt
 
-        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index)
+        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index, upper_ignition_start_time=state.upper_ignition_start_time)
 
 
 if __name__ == "__main__":

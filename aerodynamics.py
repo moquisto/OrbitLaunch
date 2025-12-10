@@ -26,8 +26,12 @@ def get_wind_at_altitude(altitude: float) -> np.ndarray:
     
     wind_speed = np.interp(altitude, alt_points, speed_points)
     
-    # Assuming wind is purely from the west (in the +Y direction in ECI near equator)
-    return np.array([0.0, wind_speed, 0.0])
+    direction = np.asarray(CFG.wind_direction_vec, dtype=float)
+    norm = np.linalg.norm(direction)
+    if norm > 0:
+        direction = direction / norm
+    
+    return direction * wind_speed
 
 
 def mach_dependent_cd(mach: float) -> float:
