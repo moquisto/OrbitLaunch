@@ -355,7 +355,7 @@ class Simulation:
             # 3. STAGE SEPARATION:
             # Check the rocket model to see if a stage separation event should occur.
             # This is the primary event that changes the simulation's stage_index.
-            if self.rocket.stage_separation(state):
+            if self.rocket.stage_separation(t_sim, state):
                 stage_idx = getattr(state, "stage_index", 0)
                 if stage_idx < len(self.rocket.stages) - 1:
                     # Perform the staging event:

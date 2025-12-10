@@ -22,18 +22,18 @@ class Config:
     target_orbit_alt_m: float = 420_000.0
 
     # Vehicle (BFR/Starship-inspired, based on recent public estimates)
-    booster_thrust_vac: float = 7.4e7
-    booster_thrust_sl: float = 7.35e7
-    booster_isp_vac: float = 350.0
-    booster_isp_sl: float = 327.0
-    booster_dry_mass: float = 2.75e5    # ~275 t dry
+    booster_thrust_vac: float = 7.6e7
+    booster_thrust_sl: float = 7.6e7
+    booster_isp_vac: float = 380.0
+    booster_isp_sl: float = 330.0
+    booster_dry_mass: float = 1.2e5    # ~275 t dry
     booster_prop_mass: float = 3.4e6    # ~3400 t prop
 
-    upper_thrust_vac: float = 1.47e7
+    upper_thrust_vac: float = 1.5e7
     upper_thrust_sl: float = 1.35e7
     upper_isp_vac: float = 380.0
-    upper_isp_sl: float = 327.0
-    upper_dry_mass: float = 1.0e5       # ~100 t dry
+    upper_isp_sl: float = 330.0
+    upper_dry_mass: float = 0.8e5       # ~100 t dry
     upper_prop_mass: float = 1.2e6      # ~1200 t prop
 
     ref_area_m2: float = 3.14159265359 * (4.5 ** 2)  # ~9 m dia
@@ -55,7 +55,7 @@ class Config:
 
     # Simulation timing
     main_duration_s: float = 100000
-    main_dt_s: float = 1.0
+    main_dt_s: float = 0.1
     integrator: str = "rk4"  # options: "rk4", "velocity_verlet"
 
     # Orbit tolerances
@@ -67,7 +67,7 @@ class Config:
     post_orbit_coast_s: float = 0.0
 
     # Optional path constraints
-    max_q_limit: float | None = 3e5  # set to a Pa value to penalize exceeding
+    max_q_limit: float | None = 1e6  # set to a Pa value to penalize exceeding
     max_accel_limit: float | None = 40.0  # set to m/s^2 to penalize exceeding
 
     # --- Guidance ---
@@ -82,10 +82,12 @@ class Config:
     pitch_guidance_function: str = "custom_guidance.simple_pitch_program"
     pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 88.0],   # Start almost vertical
-            [10_000.0, 80.0], # 80 deg at 10km
-            [30_000.0, 45.0], # 45 deg at 30km
-            [80_000.0, 0.0],  # Horizontal at 80km
+            [0.0, 89.0],     # Initial vertical ascent (very steep)
+            [10_000.0, 88.0],  # Still very steep to clear initial atmosphere
+            [40_000.0, 80.0],  # More aggressive pitch down than previous iteration
+            [80_000.0, 40.0],  # Much more aggressive pitch over
+            [120_000.0, 10.0], # Approaching horizontal faster
+            [150_000.0, 0.0],  # Full horizontal at 150km (lower altitude than previous to build speed earlier)
         ]
     )
     pitch_prograde_speed_threshold: float = 100.0  # [m/s] speed needed to align with velocity
@@ -109,14 +111,29 @@ class Config:
     wind_speed_points: list = dataclasses.field(default_factory=lambda: [0.0, 50.0, 0.0])
     mach_cd_map: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 0.15], [0.8, 0.25], [1.1, 1.4], [1.8, 0.8],
-            [3.0, 0.5], [5.0, 0.4], [10.0, 0.35]
+            [0.0, 0.15], # Subsonic
+            [0.8, 0.3],  # Approaching transonic, starts increasing
+            [1.0, 0.6],  # Transonic, before peak
+            [1.1, 0.65], # Peak at M=1.1, more realistic value for rounded nose
+            [1.2, 0.6],  # After peak, decreasing
+            [1.8, 0.5],  # Supersonic, decreasing
+            [3.0, 0.4],  # Supersonic, decreasing
+            [5.0, 0.35], # Supersonic, decreasing
+            [10.0, 0.3]  # Supersonic/Hypersonic, asymptoting
         ]
     )
 
     # Throttle Guidance
     throttle_guidance_mode: str = "parameterized"  # 'parameterized' or 'function'
     throttle_guidance_function_class: str = "custom_guidance.TwoPhaseUpperThrottle"
+    booster_throttle_program: list = dataclasses.field(
+        default_factory=lambda: [
+            [0.0, 0.7],    # Start at 70% throttle
+            [60.0, 0.9],   # Ramp to 90% at 60 seconds
+            [120.0, 1.0],  # Full throttle at 120 seconds
+            [1000.0, 1.0], # Hold full throttle
+        ]
+    )
     upper_stage_throttle_program: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 1.0],    # Full throttle from ignition

@@ -133,6 +133,7 @@ class Rocket:
         shutdown_ramp_time: float = 1.0,
         throttle_shape_full_threshold: float = 0.99,
         mach_ref_speed: float | None = None,
+        booster_throttle_program: Optional[list] = None, # New parameter
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
@@ -149,6 +150,7 @@ class Rocket:
         self.shutdown_ramp_time = float(max(shutdown_ramp_time, 0.0))
         self.throttle_shape_full_threshold = float(np.clip(throttle_shape_full_threshold, 0.0, 1.0))
         self.mach_ref_speed = float(mach_ref_speed) if mach_ref_speed is not None else CFG.mach_reference_speed
+        self.booster_throttle_program = booster_throttle_program # Store the program
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -285,8 +287,12 @@ class Rocket:
                     # Ramp-up phase from t=0.
                     shape = max(0.0, t / self.main_engine_ramp_time)
                 else:
-                    # Full thrust phase.
-                    shape = 1.0
+                    # Use booster throttle program if defined, otherwise full thrust.
+                    if self.booster_throttle_program:
+                        # Throttle based on time for the booster
+                        shape = self._interpolate_program(self.booster_throttle_program, t)
+                    else:
+                        shape = 1.0
             else:
                 # 2. Booster has run out of fuel.
                 # The `stage_fuel_empty_time` is set when propellant tracking shows empty.
@@ -398,7 +404,7 @@ class Rocket:
     # ------------------------------------------------------------------
     # Stage separation helper
     # ------------------------------------------------------------------
-    def stage_separation(self, state) -> bool:
+    def stage_separation(self, t_current: float, state) -> bool:
         """
         Return True if, according to this model, the booster should have
         been jettisoned.
@@ -432,9 +438,37 @@ class Rocket:
 
         # Time-based trigger if scheduled
         if self.separation_time_planned is not None:
-            return self._last_time >= self.separation_time_planned
+            return t_current >= self.separation_time_planned
 
         return False
+
+    @staticmethod
+    def _interpolate_program(program: list, x: float) -> float:
+        """
+        Linearly interpolates a value from a parameterized program (list of [x, y] points).
+        Assumes program points are sorted by x.
+        If x is outside the program range, it clamps to the nearest y value.
+        """
+        if not program:
+            return 1.0  # Default to full throttle if program is empty
+
+        xs = [p[0] for p in program]
+        ys = [p[1] for p in program]
+
+        # Clamp x to the range of the program
+        if x <= xs[0]:
+            return ys[0]
+        if x >= xs[-1]:
+            return ys[-1]
+
+        # Find the interval
+        for i in range(len(xs) - 1):
+            if xs[i] <= x < xs[i+1]:
+                x0, y0 = program[i]
+                x1, y1 = program[i+1]
+                return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+        return 1.0 # Should not be reached if program is valid and x is clamped
+
 
 
 # ------------------------------------------------------------------
