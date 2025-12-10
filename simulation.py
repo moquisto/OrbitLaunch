@@ -136,23 +136,40 @@ class Simulation:
         self.max_accel_limit = max_accel_limit
         self.impact_altitude_buffer_m = impact_altitude_buffer_m
         self.escape_radius_factor = escape_radius_factor
+        # Tiny memo caches (cleared each run)
+        self._atmo_cache: dict[tuple[float, float], Any] = {}
+        self._wind_cache: dict[float, np.ndarray] = {}
 
     def _rhs(self, t_env: float, t_sim: float, state: State, control: ControlCommand):
         r = np.asarray(state.r_eci, dtype=float)
         v = np.asarray(state.v_eci, dtype=float)
+        r_norm = np.linalg.norm(r)
+        v_norm = np.linalg.norm(v)
         mass = max(float(state.m), 1e-6)  # prevent divide-by-zero
 
         # Gravity
         a_grav = self.earth.gravity_accel(r)
 
         # Atmosphere and drag
-        altitude = max(0.0, np.linalg.norm(r) - float(self.earth.radius))
-        props = self.atmosphere.properties(altitude, t_env)
+        altitude = max(0.0, r_norm - float(self.earth.radius))
+        props_key = (altitude, t_env)
+        if props_key in self._atmo_cache:
+            props = self._atmo_cache[props_key]
+        else:
+            props = self.atmosphere.properties(altitude, t_env)
+            self._atmo_cache[props_key] = props
         p_amb = float(props.p)
+
+        # Wind cache keyed only on altitude (cheap, deterministic).
+        if altitude in self._wind_cache:
+            wind_vec = self._wind_cache[altitude]
+        else:
+            wind_vec = get_wind_at_altitude(altitude) if CFG.use_jet_stream_model else np.zeros(3)
+            self._wind_cache[altitude] = wind_vec
+
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
         # Dynamic pressure for limit handling (depends only on v_rel, not thrust)
         v_atm = self.earth.atmosphere_velocity(r)
-        wind_vec = get_wind_at_altitude(altitude) if CFG.use_jet_stream_model else np.zeros(3)
         v_air = v_atm + wind_vec
         v_rel = v - v_air
         v_rel_mag = np.linalg.norm(v_rel)
@@ -168,6 +185,9 @@ class Simulation:
             "t": t_sim,
             "throttle": throttle,
             "thrust_dir_eci": control.thrust_direction,
+            "dir_is_unit": True,
+            "speed": v_norm,
+            "velocity_vec": v,
         }
         F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(control_payload, state, p_amb)
 
@@ -190,8 +210,6 @@ class Simulation:
         R_air = CFG.air_gas_constant
         a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
-        v_norm = np.linalg.norm(v)
-        r_norm = np.linalg.norm(r)
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
         v_horiz = float(np.sqrt(max(v_norm**2 - vr**2, 0.0)))
         fpa_deg = float(np.degrees(np.arctan2(vr, v_horiz))) if (v_horiz > 0 or vr != 0) else 0.0
@@ -245,6 +263,8 @@ class Simulation:
         self.rocket.separation_time_planned = None
         self.rocket.upper_ignition_start_time = None
         orbit_coast_end: float | None = None
+        self._atmo_cache.clear()
+        self._wind_cache.clear()
 
         while t_sim <= t_end_sim:
             # --- Main Simulation Loop ---
@@ -262,9 +282,21 @@ class Simulation:
             ):
                 state.stage_index = 0
 
-            # Get guidance commands and calculate forces for the current state.
-            control = self.guidance.compute_command(t_sim, state)
-            drdt, dvdt, dmdt, extras = self._rhs(t_env, t_sim, state, control)
+            # Cache derivatives/extras so we don't recompute for logging + integrator.
+            rhs_cache: dict[tuple[float, int], tuple[np.ndarray, np.ndarray, float, dict]] = {}
+
+            def rhs_cached(tau: float, s: State):
+                key = (tau, id(s))
+                if key not in rhs_cache:
+                    control_local = self.guidance.compute_command(tau, s)
+                    t_env_tau = t_env + (tau - t_sim)
+                    rhs_cache[key] = self._rhs(t_env_tau, tau, s, control_local)
+                dr_dt, dv_dt, dm_dt, _extras = rhs_cache[key]
+                return dr_dt, dv_dt, dm_dt
+
+            # Trigger first evaluation (k1) for current state/time and log using it.
+            drdt, dvdt, dmdt = rhs_cached(t_sim, state)
+            extras = rhs_cache[(t_sim, id(state))][3]
             logger.record(t_sim, t_env, state, extras)
 
             # --- TERMINATION & EVENT CHECKS ---
@@ -316,10 +348,9 @@ class Simulation:
                 break
 
             # --- INTEGRATION & STAGING ---
-            
+
             # Step the integrator forward by one time step (dt).
-            deriv_fn = lambda tau, s: self._rhs(t_env + (tau - t_sim), tau, s, self.guidance.compute_command(tau, s))[:3]
-            state = self.integrator.step(deriv_fn, state, t_sim, dt)
+            state = self.integrator.step(rhs_cached, state, t_sim, dt)
 
             # 3. STAGE SEPARATION:
             # Check the rocket model to see if a stage separation event should occur.

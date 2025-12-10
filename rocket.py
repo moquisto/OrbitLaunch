@@ -231,10 +231,16 @@ class Rocket:
             t = float(control.get("t", 0.0))
             throttle_cmd = float(control.get("throttle", 1.0))
             thrust_dir = control.get("thrust_dir_eci", None)
+            dir_is_unit = bool(control.get("dir_is_unit", False))
+            speed_override = control.get("speed", None)
+            v_override = control.get("velocity_vec", None)
         else:
             t = float(getattr(control, "t", 0.0))
             throttle_cmd = float(getattr(control, "throttle", 1.0))
             thrust_dir = getattr(control, "thrust_dir_eci", None)
+            dir_is_unit = bool(getattr(control, "dir_is_unit", False))
+            speed_override = getattr(control, "speed", None)
+            v_override = getattr(control, "velocity_vec", None)
 
         # Estimate local time step based on the last call (for propellant bookkeeping)
         prev_t = self._last_time
@@ -242,8 +248,8 @@ class Rocket:
         self._last_time = t
 
         # Determine an approximate Mach number based on inertial speed.
-        v_vec = np.asarray(state.v_eci, dtype=float)
-        speed = float(np.linalg.norm(v_vec))
+        v_vec = np.asarray(v_override, dtype=float) if v_override is not None else np.asarray(state.v_eci, dtype=float)
+        speed = float(speed_override) if speed_override is not None else float(np.linalg.norm(v_vec))
         mach = speed / self.mach_ref_speed if self.mach_ref_speed > 0.0 else 0.0
 
         stage_idx = self.current_stage_index(state)
@@ -361,12 +367,13 @@ class Rocket:
                 dir_vec = np.array([0.0, 0.0, 1.0], dtype=float)
         else:
             dir_vec = np.asarray(thrust_dir, dtype=float)
-            n = np.linalg.norm(dir_vec)
-            if n == 0.0:
-                # Fallback if a zero vector is passed
-                dir_vec = np.array([0.0, 0.0, 1.0], dtype=float)
-            else:
-                dir_vec = dir_vec / n
+            if not dir_is_unit:
+                n = np.linalg.norm(dir_vec)
+                if n == 0.0:
+                    # Fallback if a zero vector is passed
+                    dir_vec = np.array([0.0, 0.0, 1.0], dtype=float)
+                else:
+                    dir_vec = dir_vec / n
 
         thrust_vec = thrust_mag * dir_vec
 
