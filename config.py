@@ -111,15 +111,15 @@ class Config:
     wind_speed_points: list = dataclasses.field(default_factory=lambda: [0.0, 50.0, 0.0])
     mach_cd_map: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 0.15], # Subsonic
-            [0.8, 0.3],  # Approaching transonic, starts increasing
-            [1.0, 0.6],  # Transonic, before peak
-            [1.1, 0.65], # Peak at M=1.1, more realistic value for rounded nose
-            [1.2, 0.6],  # After peak, decreasing
-            [1.8, 0.5],  # Supersonic, decreasing
-            [3.0, 0.4],  # Supersonic, decreasing
-            [5.0, 0.35], # Supersonic, decreasing
-            [10.0, 0.3]  # Supersonic/Hypersonic, asymptoting
+            [0.0, 0.25], # Subsonic (increased from 0.15, within 0.2-0.4 range)
+            [0.8, 0.4],  # Approaching transonic, starts increasing
+            [1.0, 0.7],  # Transonic, before peak (increased from 0.6)
+            [1.1, 0.85], # Peak at M=1.1 (increased from 0.65, within 0.5-0.9 range)
+            [1.2, 0.7],  # After peak, decreasing
+            [1.8, 0.6],  # Supersonic, decreasing
+            [3.0, 0.5],  # Supersonic, decreasing
+            [5.0, 0.45], # Supersonic, decreasing
+            [10.0, 0.4]  # Supersonic/Hypersonic, asymptoting
         ]
     )
 
