@@ -14,8 +14,8 @@ import numpy as np
 
 from aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
 from atmosphere import AtmosphereModel
-from gravity import EarthModel, MU_EARTH, OMEGA_EARTH, R_EARTH
-from integrators import RK4, State
+from gravity import EarthModel
+from integrators import RK4, VelocityVerlet, State
 from rocket import Engine, Rocket, Stage
 from simulation import Guidance, Simulation
 from config import CFG
@@ -40,7 +40,7 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
     east_norm = np.linalg.norm(east)
     east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
 
-    alt = r_norm - R_EARTH
+    alt = r_norm - CFG.earth_radius_m
     start = CFG.pitch_turn_start_m
     end = CFG.pitch_turn_end_m
     if alt < start:
@@ -50,7 +50,7 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
         direction = (1.0 - w) * r_hat + w * east
     else:
         speed = np.linalg.norm(v)
-        if speed > 1.0:
+        if speed > CFG.pitch_prograde_speed_threshold:
             direction = v / speed  # prograde
         else:
             direction = east
@@ -60,7 +60,7 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
 
 def throttle_schedule(t: float, state: State) -> float:
     """Hold full throttle; adapt here if you want to throttle for max-Q, etc."""
-    return 1.0
+    return CFG.base_throttle_cmd
 
 
 class TwoPhaseUpperThrottle:
@@ -69,8 +69,9 @@ class TwoPhaseUpperThrottle:
     apoapsis, then circularize to raise perigee.
     """
 
-    def __init__(self, target_radius: float):
+    def __init__(self, target_radius: float, mu: float):
         self.target_radius = target_radius
+        self.mu = mu
         self.phase = "boost"
         self.target_ap = target_radius
         self.transitions: list[tuple[str, float]] = [("boost", 0.0)]
@@ -82,7 +83,7 @@ class TwoPhaseUpperThrottle:
 
         r = np.asarray(state.r_eci, dtype=float)
         v = np.asarray(state.v_eci, dtype=float)
-        a, rp, ra = orbital_elements_from_state(r, v, MU_EARTH)
+        a, rp, ra = orbital_elements_from_state(r, v, self.mu)
         r_norm = np.linalg.norm(r)
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
 
@@ -98,7 +99,7 @@ class TwoPhaseUpperThrottle:
             if ra is None:
                 return 0.0
             # Coast until near apoapsis (radial velocity ~0 and radius near ra)
-            if abs(vr) < 2.0 and abs(r_norm - ra) < 1000.0:
+            if abs(vr) < CFG.upper_throttle_vr_tolerance and abs(r_norm - ra) < CFG.upper_throttle_alt_tolerance:
                 self.phase = "circularize"
                 self.transitions.append(("circularize", t))
                 return 1.0
@@ -150,28 +151,40 @@ def build_rocket() -> Rocket:
         separation_delay=CFG.separation_delay_s,
         upper_ignition_delay=CFG.upper_ignition_delay_s,
         separation_altitude_m=CFG.separation_altitude_m,  # stage on depletion trigger, but separation is time-based
-        earth_radius=R_EARTH,
+        earth_radius=CFG.earth_radius_m,
         min_throttle=CFG.engine_min_throttle,
+        shutdown_ramp_time=CFG.engine_shutdown_ramp_s,
+        throttle_shape_full_threshold=CFG.throttle_full_shape_threshold,
+        mach_ref_speed=CFG.mach_reference_speed,
     )
 
 
 def build_simulation() -> tuple[Simulation, State, float]:
     earth = EarthModel(
-        mu=MU_EARTH,
-        radius=R_EARTH,
-        omega_vec=OMEGA_EARTH,
+        mu=CFG.earth_mu,
+        radius=CFG.earth_radius_m,
+        omega_vec=np.array(CFG.earth_omega_vec, dtype=float),
         j2=CFG.j2_coeff if CFG.use_j2 else None,
     )
     atmosphere = AtmosphereModel(
         h_switch=CFG.atmosphere_switch_alt_m,
         lat_deg=CFG.launch_lat_deg,
         lon_deg=CFG.launch_lon_deg,
+        f107=CFG.atmosphere_f107,
+        f107a=CFG.atmosphere_f107a,
+        ap=CFG.atmosphere_ap,
     )
     cd_model = CdModel(mach_dependent_cd)
     rocket = build_rocket()
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
     guidance = Guidance(pitch_program=simple_pitch_program, throttle_schedule=throttle_schedule)
-    integrator = RK4()
+    integrator_name = str(getattr(CFG, "integrator", "rk4")).lower()
+    if integrator_name in ("rk4", "runge-kutta", "rk"):
+        integrator = RK4()
+    elif integrator_name in ("velocity_verlet", "verlet", "vv"):
+        integrator = VelocityVerlet()
+    else:
+        raise ValueError(f"Unknown integrator '{CFG.integrator}'. Expected 'rk4' or 'velocity_verlet'.")
     sim = Simulation(
         earth=earth,
         atmosphere=atmosphere,
@@ -181,12 +194,14 @@ def build_simulation() -> tuple[Simulation, State, float]:
         guidance=guidance,
         max_q_limit=CFG.max_q_limit,
         max_accel_limit=CFG.max_accel_limit,
+        impact_altitude_buffer_m=CFG.impact_altitude_buffer_m,
+        escape_radius_factor=CFG.escape_radius_factor,
     )
 
     # Initial state: surface at launch site, co-rotating atmosphere
     lat = np.deg2rad(CFG.launch_lat_deg)
     lon = np.deg2rad(CFG.launch_lon_deg)
-    r0 = R_EARTH * np.array(
+    r0 = CFG.earth_radius_m * np.array(
         [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
         dtype=float,
     )
@@ -207,8 +222,8 @@ def main():
     duration = CFG.main_duration_s
     dt = CFG.main_dt_s
 
-    orbit_radius = R_EARTH + CFG.target_orbit_alt_m  # ISS-like LEO target
-    controller = TwoPhaseUpperThrottle(target_radius=orbit_radius)
+    orbit_radius = CFG.earth_radius_m + CFG.target_orbit_alt_m  # ISS-like LEO target
+    controller = TwoPhaseUpperThrottle(target_radius=orbit_radius, mu=CFG.earth_mu)
     sim.guidance.throttle_schedule = controller
     log = sim.run(
         t_env0,
@@ -224,7 +239,8 @@ def main():
     )
 
     # Summary
-    final_alt_km = (np.linalg.norm(log.r[-1]) - R_EARTH) / 1000.0
+    earth_radius = CFG.earth_radius_m
+    final_alt_km = (np.linalg.norm(log.r[-1]) - earth_radius) / 1000.0
     final_speed = np.linalg.norm(log.v[-1])
     final_mass = log.m[-1]
     final_stage = log.stage[-1]
@@ -233,17 +249,17 @@ def main():
     max_q = max(log.dynamic_pressure)
     stage_switch_times = [log.t_sim[i] for i in range(1, len(log.stage)) if log.stage[i] != log.stage[i - 1]]
     # Basic orbital diagnostics from final state
-    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], MU_EARTH)
-    rp_alt_km = (rp - R_EARTH) / 1000.0 if rp is not None else None
-    ra_alt_km = (ra - R_EARTH) / 1000.0 if ra is not None else None
+    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], CFG.earth_mu)
+    rp_alt_km = (rp - earth_radius) / 1000.0 if rp is not None else None
+    ra_alt_km = (ra - earth_radius) / 1000.0 if ra is not None else None
     # Key event indices
     idx_max_alt = int(np.argmax(log.altitude))
     idx_max_speed = int(np.argmax(log.speed))
     idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - (sim.rocket.stage_engine_off_complete_time[1] or log.t_sim[-1])))
     def print_state(label: str, idx: int):
-        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], MU_EARTH)
-        rp_alt_i = (rp_i - R_EARTH) / 1000.0 if rp_i is not None else None
-        ra_alt_i = (ra_i - R_EARTH) / 1000.0 if ra_i is not None else None
+        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], CFG.earth_mu)
+        rp_alt_i = (rp_i - earth_radius) / 1000.0 if rp_i is not None else None
+        ra_alt_i = (ra_i - earth_radius) / 1000.0 if ra_i is not None else None
         rp_str = f"{rp_alt_i:.2f}" if rp_alt_i is not None else "n/a"
         ra_str = f"{ra_alt_i:.2f}" if ra_alt_i is not None else "n/a"
         print(
@@ -295,10 +311,12 @@ def main():
     print_state("Max speed", idx_max_speed)
     print_state("Upper engine off", idx_upper_off)
 
-    save_log_to_txt(log, "simulation_log.txt")
+    save_log_to_txt(log, CFG.log_filename)
     # Enable static trajectory plot; keep animation disabled for headless use.
-    plot_trajectory_3d(log, R_EARTH)
-    # animate_trajectory(log, R_EARTH)
+    if CFG.plot_trajectory:
+        plot_trajectory_3d(log, CFG.earth_radius_m)
+    if CFG.animate_trajectory:
+        animate_trajectory(log, CFG.earth_radius_m)
 
 
 def plot_trajectory_3d(log, r_earth: float):

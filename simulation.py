@@ -123,6 +123,8 @@ class Simulation:
         guidance: Optional[Guidance] = None,
         max_q_limit: float | None = None,
         max_accel_limit: float | None = None,
+        impact_altitude_buffer_m: float = -100.0,
+        escape_radius_factor: float = 1.05,
     ):
         self.earth = earth
         self.atmosphere = atmosphere
@@ -132,6 +134,8 @@ class Simulation:
         self.guidance = guidance or Guidance()
         self.max_q_limit = max_q_limit
         self.max_accel_limit = max_accel_limit
+        self.impact_altitude_buffer_m = impact_altitude_buffer_m
+        self.escape_radius_factor = escape_radius_factor
 
     def _rhs(self, t_env: float, t_sim: float, state: State, control: ControlCommand):
         r = np.asarray(state.r_eci, dtype=float)
@@ -182,8 +186,8 @@ class Simulation:
         dm_dt = float(dm_dt)
 
         # Diagnostics
-        gamma = 1.4
-        R_air = 287.05
+        gamma = CFG.air_gamma
+        R_air = CFG.air_gas_constant
         a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
         v_norm = np.linalg.norm(v)
@@ -300,14 +304,14 @@ class Simulation:
             r_norm = np.linalg.norm(state.r_eci)
             altitude = r_norm - self.earth.radius
             # Impact: Vehicle has crashed into the Earth's surface.
-            if altitude < -100.0:
+            if altitude < self.impact_altitude_buffer_m:
                 logger.cutoff_reason = "impact"
                 break
             # Escape: Vehicle has achieved positive specific energy and is heading away
             # from Earth, indicating it will escape Earth's gravity.
             specific_energy = 0.5 * np.dot(state.v_eci, state.v_eci) - self.earth.mu / r_norm
             vr = float(np.dot(state.v_eci, state.r_eci / r_norm)) if r_norm > 0 else 0.0
-            if specific_energy > 0 and vr > 0 and r_norm > 1.05 * self.earth.radius:
+            if specific_energy > 0 and vr > 0 and r_norm > self.escape_radius_factor * self.earth.radius:
                 logger.cutoff_reason = "escape"
                 break
 

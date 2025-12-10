@@ -135,6 +135,9 @@ class Rocket:
         separation_altitude_m: Optional[float] = None,
         earth_radius: float = R_EARTH,
         min_throttle: float = 0.0,
+        shutdown_ramp_time: float = 1.0,
+        throttle_shape_full_threshold: float = 0.99,
+        mach_ref_speed: float = A0,
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
@@ -148,6 +151,9 @@ class Rocket:
         self.separation_altitude_m = separation_altitude_m
         self.earth_radius = float(earth_radius)
         self.min_throttle = float(np.clip(min_throttle, 0.0, 1.0))
+        self.shutdown_ramp_time = float(max(shutdown_ramp_time, 0.0))
+        self.throttle_shape_full_threshold = float(np.clip(throttle_shape_full_threshold, 0.0, 1.0))
+        self.mach_ref_speed = float(mach_ref_speed)
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -238,7 +244,7 @@ class Rocket:
         # Determine an approximate Mach number based on inertial speed.
         v_vec = np.asarray(state.v_eci, dtype=float)
         speed = float(np.linalg.norm(v_vec))
-        mach = speed / A0 if A0 > 0.0 else 0.0
+        mach = speed / self.mach_ref_speed if self.mach_ref_speed > 0.0 else 0.0
 
         stage_idx = self.current_stage_index(state)
         stage = self.stages[stage_idx]
@@ -283,16 +289,17 @@ class Rocket:
             else:
                 # 2. Booster has run out of fuel.
                 # The `stage_fuel_empty_time` is set when propellant tracking shows empty.
-                if t < fuel_empty_time + 1.0:
-                    # Ramp-down phase (1 second duration).
-                    shape = max(0.0, 1.0 - (t - fuel_empty_time))
+                ramp_end = fuel_empty_time + self.shutdown_ramp_time
+                if t < ramp_end:
+                    # Ramp-down phase.
+                    shape = max(0.0, 1.0 - (t - fuel_empty_time) / max(self.shutdown_ramp_time, 1e-9))
                 else:
                     # Engine is fully off.
                     shape = 0.0
                     # If this is the first time we've noted the engine is off,
                     # schedule the future events: stage separation and upper stage ignition.
                     if off_time is None:
-                        off_time = fuel_empty_time + 1.0
+                        off_time = ramp_end
                         self.stage_engine_off_complete_time[0] = off_time
                         self.separation_time_planned = off_time + self.separation_delay
                         self.upper_ignition_start_time = self.separation_time_planned + self.upper_ignition_delay
@@ -315,20 +322,25 @@ class Rocket:
                         shape = 1.0
                 else:
                     # 1b. Upper stage has run out of fuel.
-                    if t < fuel_empty_time + 1.0:
-                        # Ramp-down phase (1 second duration).
-                        shape = max(0.0, 1.0 - (t - fuel_empty_time))
+                    ramp_end = fuel_empty_time + self.shutdown_ramp_time
+                    if t < ramp_end:
+                        # Ramp-down phase.
+                        shape = max(0.0, 1.0 - (t - fuel_empty_time) / max(self.shutdown_ramp_time, 1e-9))
                     else:
                         # Engine is fully off.
                         shape = 0.0
                         if off_time is None:
-                            self.stage_engine_off_complete_time[1] = fuel_empty_time + 1.0
+                            self.stage_engine_off_complete_time[1] = ramp_end
             # Note: If ignition_start is None or t < ignition_start, shape remains 0.0.
 
         # Combine stage shape with commanded throttle
         effective_throttle = np.clip(throttle_cmd * shape, 0.0, 1.0)
         # Enforce minimum throttle when the engine is up to speed (shape ~1) and commanded on.
-        if shape >= 0.99 and effective_throttle > 0.0 and self.min_throttle > 0.0:
+        if (
+            shape >= self.throttle_shape_full_threshold
+            and effective_throttle > 0.0
+            and self.min_throttle > 0.0
+        ):
             effective_throttle = max(effective_throttle, self.min_throttle)
 
         # Engine performance (uses ambient pressure from the atmosphere model)

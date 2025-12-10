@@ -13,6 +13,11 @@ class Config:
     launch_lat_deg: float = 28.60839
     launch_lon_deg: float = -80.60433
 
+    # Central body (can be changed to model other planets)
+    earth_mu: float = 3.986_004_418e14          # [m^3/s^2]
+    earth_radius_m: float = 6_371_000.0         # [m]
+    earth_omega_vec: tuple[float, float, float] = (0.0, 0.0, 7.292_115_9e-5)  # [rad/s]
+
     # Target orbit (circular)
     target_orbit_alt_m: float = 420_000.0
 
@@ -42,12 +47,16 @@ class Config:
     upper_engine_ramp_time: float = 3.0
     separation_delay_s: float = 5.0     # coast after booster cutoff
     upper_ignition_delay_s: float = 2.0 # settle delay before upper ignition
+    engine_shutdown_ramp_s: float = 1.0  # burn-out ramp-down duration for each stage
+    throttle_full_shape_threshold: float = 0.99  # shape value considered "full" for min throttle enforcement
+    mach_reference_speed: float = 340.0  # [m/s] reference speed of sound for Mach estimates
     meco_mach: float = 6.0
     separation_altitude_m: float | None = None
 
     # Simulation timing
     main_duration_s: float = 100000
     main_dt_s: float = 1.0
+    integrator: str = "rk4"  # options: "rk4", "velocity_verlet"
 
     # Orbit tolerances
     orbit_speed_tol: float = 50.0
@@ -64,10 +73,43 @@ class Config:
     # Pitch program shape
     pitch_turn_start_m: float = 5_000.0
     pitch_turn_end_m: float = 60_000.0
+    pitch_prograde_speed_threshold: float = 1.0  # [m/s] speed needed to align with velocity
 
     # Atmosphere
     atmosphere_switch_alt_m: float = 86_000.0
+    atmosphere_f107: float | None = None
+    atmosphere_f107a: float | None = None
+    atmosphere_ap: float | None = None
     use_jet_stream_model: bool = True
+
+    # Physics
+    air_gamma: float = 1.4
+    air_gas_constant: float = 287.05  # J/(kg*K)
+
+    # Aerodynamics
+    wind_alt_points: list = dataclasses.field(default_factory=lambda: [8_000.0, 10_500.0, 13_000.0])
+    wind_speed_points: list = dataclasses.field(default_factory=lambda: [0.0, 50.0, 0.0])
+    mach_cd_map: list = dataclasses.field(
+        default_factory=lambda: [
+            [0.0, 0.15], [0.8, 0.25], [1.1, 1.4], [1.8, 0.8],
+            [3.0, 0.5], [5.0, 0.4], [10.0, 0.35]
+        ]
+    )
+
+    # Guidance
+    upper_throttle_vr_tolerance: float = 2.0
+    upper_throttle_alt_tolerance: float = 1000.0
+    base_throttle_cmd: float = 1.0  # default throttle for simple schedule
+
+    # Termination logic
+    impact_altitude_buffer_m: float = -100.0  # stop after sinking below this altitude
+    escape_radius_factor: float = 1.05        # end sim if r exceeds this * planet radius with positive energy
+
+    # Output/logging
+    log_filename: str = "simulation_log.txt"
+    plot_trajectory: bool = True
+    animate_trajectory: bool = False
+
 
 
 

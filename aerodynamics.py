@@ -19,10 +19,10 @@ def get_wind_at_altitude(altitude: float) -> np.ndarray:
     The wind profile ramps up to a peak speed in the jet stream layer (8-13 km)
     and is zero outside this band.
     """
-    alt_points = np.array([8_000.0, 10_500.0, 13_000.0])
+    alt_points = np.array(CFG.wind_alt_points)
     # Wind from the west (positive Y direction in ECI at launch)
     # reaching a peak of 50 m/s (~112 mph)
-    speed_points = np.array([0.0, 50.0, 0.0])
+    speed_points = np.array(CFG.wind_speed_points)
     
     wind_speed = np.interp(altitude, alt_points, speed_points)
     
@@ -36,8 +36,9 @@ def mach_dependent_cd(mach: float) -> float:
     based on the Mach number. This captures the characteristic transonic drag
     rise and subsequent decrease in the supersonic regime.
     """
-    mach_points = np.array([0.0, 0.8, 1.1, 1.8, 3.0, 5.0, 10.0])
-    cd_points = np.array([0.15, 0.25, 1.4, 0.8, 0.5, 0.4, 0.35])
+    mach_cd_map = np.array(CFG.mach_cd_map)
+    mach_points = mach_cd_map[:, 0]
+    cd_points = mach_cd_map[:, 1]
     return np.interp(mach, mach_points, cd_points)
 
 
@@ -118,8 +119,8 @@ class Aerodynamics:
             return np.zeros(3)
 
         # Speed of sound (ideal gas, dry air) and Mach number.
-        gamma = 1.4
-        R_air = 287.05  # J/(kg*K)
+        gamma = CFG.air_gamma
+        R_air = CFG.air_gas_constant
         a = np.sqrt(max(gamma * R_air * T, 0.0))
         mach = v_rel_mag / a if a > 0.0 else 0.0
 
