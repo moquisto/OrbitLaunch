@@ -63,9 +63,14 @@ class Config:
     # Pitch program shape
     pitch_turn_start_m: float = 5_000.0
     pitch_turn_end_m: float = 60_000.0
+    pitch_blend_exp: float = 1.0  # 1 = linear blend, >1 slower turn then faster
 
     # Atmosphere
     atmosphere_switch_alt_m: float = 86_000.0
+
+    # Upper-stage throttle caps (fractions of full thrust)
+    upper_boost_throttle_cap: float = 1.0
+    upper_circ_throttle_cap: float = 1.0
 
 
 CFG = Config()

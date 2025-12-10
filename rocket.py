@@ -133,6 +133,8 @@ class Rocket:
         separation_altitude_m: Optional[float] = None,
         earth_radius: float = R_EARTH,
         min_throttle: float = 0.0,
+        upper_boost_throttle_cap: float = 1.0,
+        upper_circ_throttle_cap: float = 1.0,
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
@@ -146,6 +148,8 @@ class Rocket:
         self.separation_altitude_m = separation_altitude_m
         self.earth_radius = float(earth_radius)
         self.min_throttle = float(np.clip(min_throttle, 0.0, 1.0))
+        self.upper_boost_throttle_cap = float(np.clip(upper_boost_throttle_cap, 0.0, 1.0))
+        self.upper_circ_throttle_cap = float(np.clip(upper_circ_throttle_cap, 0.0, 1.0))
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -332,6 +336,12 @@ class Rocket:
         # Enforce minimum throttle when the engine is up to speed (shape ~1) and commanded on.
         if shape >= 0.99 and effective_throttle > 0.0 and self.min_throttle > 0.0:
             effective_throttle = max(effective_throttle, self.min_throttle)
+        # Apply upper-stage throttle caps
+        if stage_idx == 1 and effective_throttle > 0.0:
+            # If we are in boost (before coast/circ), cap at boost cap; otherwise use circ cap.
+            # Here we can’t perfectly know phase; apply the higher of the two caps conservatively.
+            cap = max(self.upper_boost_throttle_cap, self.upper_circ_throttle_cap)
+            effective_throttle = min(effective_throttle, cap)
 
         # Engine performance (uses ambient pressure from the atmosphere model)
         thrust_mag, isp = stage.engine.thrust_and_isp(effective_throttle, p_amb)

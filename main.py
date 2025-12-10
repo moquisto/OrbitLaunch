@@ -47,6 +47,7 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
         return r_hat
     elif alt < end:
         w = (alt - start) / max(end - start, 1.0)
+        w = w**CFG.pitch_blend_exp
         direction = (1.0 - w) * r_hat + w * east
     else:
         speed = np.linalg.norm(v)
@@ -152,6 +153,8 @@ def build_rocket() -> Rocket:
         separation_altitude_m=CFG.separation_altitude_m,  # stage on depletion trigger, but separation is time-based
         earth_radius=R_EARTH,
         min_throttle=CFG.engine_min_throttle,
+        upper_boost_throttle_cap=CFG.upper_boost_throttle_cap,
+        upper_circ_throttle_cap=CFG.upper_circ_throttle_cap,
     )
 
 
