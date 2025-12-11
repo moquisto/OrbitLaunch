@@ -2,8 +2,18 @@ import numpy as np
 import types
 import pytest
 
-from simulation import Simulation, Guidance
-from integrators import State, RK4
+from Main.simulation import Simulation, Guidance
+from Main.state import State
+from Main.integrators import RK4
+from Environment.config import EnvironmentConfig
+from Hardware.config import HardwareConfig
+from Software.config import SoftwareConfig
+from Main.config import SimulationConfig
+from Logging.config import LoggingConfig
+from Environment.gravity import EarthModel
+from Environment.atmosphere import AtmosphereModel
+from Environment.aerodynamics import Aerodynamics
+from Hardware.rocket import Rocket, Engine, Stage
 
 
 class DummyProps:
@@ -14,63 +24,122 @@ class DummyProps:
 
 
 class DummyEarth:
-    def __init__(self, mu=1e5, radius=1000.0):
+    def __init__(self, mu=1e5, radius=1000.0, omega_vec=np.zeros(3), j2=None):
         self.mu = mu
         self.radius = radius
+        self.omega_vec = omega_vec
+        self.j2 = j2
 
     def gravity_accel(self, r):
         r = np.asarray(r, dtype=float)
         r_norm = np.linalg.norm(r)
         if r_norm == 0:
             return np.zeros(3)
-        return -self.mu * r / (r_norm ** 3)
+        a_central = -self.mu * r / (r_norm ** 3)
+        if self.j2 is None or self.j2 == 0.0:
+            return a_central
+        # Simplified J2 perturbation for testing
+        x, y, z = r
+        r2 = r_norm * r_norm
+        z2 = z * z
+        factor = 1.5 * self.j2 * self.mu * (self.radius**2) / (r_norm**5)
+        k = 5.0 * z2 / r2
+        a_j2_x = factor * x * (1.0 - k)
+        a_j2_y = factor * y * (1.0 - k)
+        a_j2_z = factor * z * (3.0 - k)
+        a_j2 = np.array([a_j2_x, a_j2_y, a_j2_z], dtype=float)
+        return a_central + a_j2
 
     def atmosphere_velocity(self, r):
         return np.zeros(3)
 
 
 class DummyAtmosphere:
+    def __init__(self, env_config=None):
+        self._rho = 1.0
+        self._T = 300.0
+        self._p = 0.0
+        self.env_config = env_config or EnvironmentConfig()
+
     def properties(self, alt, t_env):
-        return DummyProps()
+        return type("Props", (), {"rho": self._rho, "T": self._T, "p": self._p})
+    
+    def get_speed_of_sound(self, alt, t_env):
+        return 340.0
 
 
 class DummyAero:
+    def __init__(self, atmosphere=None, cd_model=None, env_config=None):
+        self.atmosphere = atmosphere or DummyAtmosphere()
+        self.cd_model = cd_model or type("CdModel", (), {"cd": lambda mach: 2.0})()
+        self.env_config = env_config or EnvironmentConfig()
+
     def drag_force(self, state, earth, t_env, rocket):
         return np.zeros(3)
 
 
-class DummyRocket:
-    def __init__(self):
-        self.stages = [types.SimpleNamespace(prop_mass=1.0)]
-        self.stage_prop_remaining = [1.0]
-        self.stage_fuel_empty_time = [None]
-        self.stage_engine_off_complete_time = [None]
-        self.separation_time_planned = None
-        self.upper_ignition_start_time = None
-        self._last_time = 0.0
-        self.meco_time = None
-        self.upper_ignition_delay = 0.0
+def build_dummy_rocket(hw_config: HardwareConfig, env_config: EnvironmentConfig) -> Rocket:
+    booster_engine = Engine(
+        thrust_vac=hw_config.booster_thrust_vac,
+        thrust_sl=hw_config.booster_thrust_sl,
+        isp_vac=hw_config.booster_isp_vac,
+        isp_sl=hw_config.booster_isp_sl,
+        p_sl=env_config.P_SL,
+    )
+    upper_engine = Engine(
+        thrust_vac=hw_config.upper_thrust_vac,
+        thrust_sl=hw_config.upper_thrust_sl,
+        isp_vac=hw_config.upper_isp_vac,
+        isp_sl=hw_config.upper_isp_sl,
+        p_sl=env_config.P_SL,
+    )
 
-    def thrust_and_mass_flow(self, control, state, p_amb):
-        if self.separation_time_planned is None:
-            self.separation_time_planned = 0.0
-        return np.zeros(3), 0.0
-
-    def reference_area(self, state):
-        return 1.0
-
-    def current_stage_index(self, state):
-        return 0
+    booster_stage = Stage(
+        dry_mass=hw_config.booster_dry_mass,
+        prop_mass=hw_config.booster_prop_mass,
+        engine=booster_engine,
+        ref_area=hw_config.ref_area_m2,
+    )
+    upper_stage = Stage(
+        dry_mass=hw_config.upper_dry_mass,
+        prop_mass=hw_config.upper_prop_mass,
+        engine=upper_engine,
+        ref_area=hw_config.ref_area_m2,
+    )
+    return Rocket(
+        stages=[booster_stage, upper_stage],
+        hw_config=hw_config,
+        env_config=env_config,
+        booster_throttle_program=None, # Not relevant for these tests
+    )
 
 
 def test_simulation_orbit_exit():
-    earth = DummyEarth(mu=1e5, radius=1000.0)
-    atmosphere = DummyAtmosphere()
-    aero = DummyAero()
-    rocket = DummyRocket()
+    # Instantiate configs
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    sw_config = SoftwareConfig() # Needed for Simulation constructor
+
+    earth = DummyEarth(mu=env_config.earth_mu, radius=env_config.earth_radius_m, omega_vec=env_config.earth_omega_vec)
+    atmosphere = DummyAtmosphere(env_config)
+    aero = DummyAero(atmosphere=atmosphere, env_config=env_config)
+    rocket = build_dummy_rocket(hw_config, env_config)
     integrator = RK4()
     guidance = Guidance()
-    sim = Simulation(earth, atmosphere, aero, rocket, integrator=integrator, guidance=guidance)
+
+    sim = Simulation(
+        earth=earth,
+        atmosphere=atmosphere,
+        aerodynamics=aero,
+        rocket=rocket,
+        sim_config=sim_config,
+        env_config=env_config,
+        log_config=log_config,
+        integrator=integrator,
+        guidance=guidance,
+    )
 
     r0 = np.array([earth.radius, 0.0, 0.0])
     v_circ = np.sqrt(earth.mu / earth.radius)
@@ -81,24 +150,41 @@ def test_simulation_orbit_exit():
         duration=100.0,
         dt=1.0,
         state0=state0,
-        orbit_target_radius=earth.radius,
-        exit_on_orbit=True,
+        # These parameters are now taken from sim_config
     )
 
     assert log.orbit_achieved is True
     assert log.cutoff_reason == "orbit_target_met"
-    assert len(log.t_sim) < 5  # terminated early
+    assert len(log.t_sim) < 5
 
 
 def test_simulation_impact_terminates():
-    earth = DummyEarth(mu=1e5, radius=1000.0)
-    atmosphere = DummyAtmosphere()
-    aero = DummyAero()
-    rocket = DummyRocket()
-    guidance = Guidance()
-    sim = Simulation(earth, atmosphere, aero, rocket, integrator=RK4(), guidance=guidance)
+    # Instantiate configs
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    sw_config = SoftwareConfig()
 
-    r0 = np.array([earth.radius - 200.0, 0.0, 0.0])  # below surface by 200 m
+    earth = DummyEarth(mu=env_config.earth_mu, radius=env_config.earth_radius_m, omega_vec=env_config.earth_omega_vec)
+    atmosphere = DummyAtmosphere(env_config)
+    aero = DummyAero(atmosphere=atmosphere, env_config=env_config)
+    rocket = build_dummy_rocket(hw_config, env_config)
+    guidance = Guidance()
+
+    sim = Simulation(
+        earth=earth,
+        atmosphere=atmosphere,
+        aerodynamics=aero,
+        rocket=rocket,
+        sim_config=sim_config,
+        env_config=env_config,
+        log_config=log_config,
+        integrator=RK4(),
+        guidance=guidance,
+    )
+
+    r0 = np.array([earth.radius - 200.0, 0.0, 0.0])
     state0 = State(r_eci=r0, v_eci=np.zeros(3), m=1.0, stage_index=0)
 
     log = sim.run(
@@ -106,43 +192,59 @@ def test_simulation_impact_terminates():
         duration=10.0,
         dt=1.0,
         state0=state0,
-        orbit_target_radius=None,
-        exit_on_orbit=True,
     )
 
     assert log.orbit_achieved is False
     assert log.cutoff_reason == "impact"
-    assert len(log.t_sim) == 1  # stopped immediately
+    assert len(log.t_sim) == 1
 
 
 def test_simulation_stage_separation_and_mass_drop():
-    earth = DummyEarth(mu=1e5, radius=1000.0)
-    atmosphere = DummyAtmosphere()
-    aero = DummyAero()
-    # Two-stage dummy rocket with known masses and an immediate separation time.
-    rocket = DummyRocket()
-    rocket.stages = [
-        types.SimpleNamespace(dry_mass=10.0, prop_mass=5.0),
-        types.SimpleNamespace(dry_mass=2.0, prop_mass=1.0),
-    ]
+    # Instantiate configs
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    sw_config = SoftwareConfig()
+
+    earth = DummyEarth(mu=env_config.earth_mu, radius=env_config.earth_radius_m, omega_vec=env_config.earth_omega_vec)
+    atmosphere = DummyAtmosphere(env_config)
+    aero = DummyAero(atmosphere=atmosphere, env_config=env_config)
+    rocket = build_dummy_rocket(hw_config, env_config)
+    # Manually set up rocket state for separation test
     rocket.stage_prop_remaining = [5.0, 1.0]
-    rocket.separation_time_planned = 0.0
-    rocket.upper_ignition_delay = 0.0
+    rocket.separation_time_planned = 0.0 # Trigger separation immediately
+    rocket.upper_ignition_delay = 0.0 # No delay for test
     guidance = Guidance()
-    sim = Simulation(earth, atmosphere, aero, rocket, integrator=RK4(), guidance=guidance)
+
+    sim = Simulation(
+        earth=earth,
+        atmosphere=atmosphere,
+        aerodynamics=aero,
+        rocket=rocket,
+        sim_config=sim_config,
+        env_config=env_config,
+        log_config=log_config,
+        integrator=RK4(),
+        guidance=guidance,
+    )
 
     r0 = np.array([earth.radius + 10.0, 0.0, 0.0])
-    state0 = State(r_eci=r0, v_eci=np.zeros(3), m=100.0, stage_index=0)
+    # Initial mass should be the sum of all dry and prop masses
+    initial_total_mass = sum(s.dry_mass + s.prop_mass for s in rocket.stages)
+    state0 = State(r_eci=r0, v_eci=np.zeros(3), m=initial_total_mass, stage_index=0)
 
     log = sim.run(
         t_env_start=0.0,
         duration=2.0,
         dt=1.0,
         state0=state0,
-        orbit_target_radius=None,
-        exit_on_orbit=False,
     )
 
-    # Stage should advance to 1 at or before the second sample, and mass should drop by booster dry+prop.
     assert max(log.stage) == 1
-    assert min(log.m) <= 85.0 + 1e-6  # 100 - (10+5)
+    # Expected remaining mass after booster separation (booster dry mass + prop, upper stage dry + prop)
+    # Booster dry mass (10.0) + remaining prop (5.0) are dropped.
+    # So initial_total_mass - (booster dry + booster prop) = (upper dry + upper prop)
+    expected_remaining_mass = rocket.stages[1].dry_mass + rocket.stages[1].prop_mass
+    assert np.isclose(min(log.m), expected_remaining_mass, atol=1e-6)
+

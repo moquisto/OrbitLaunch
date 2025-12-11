@@ -38,38 +38,23 @@ class AtmosphereModel:
     placeholders; only the interface and dispatch logic are defined here.
     """
 
-    def __init__(self, h_switch: float = 86000,
-                 f107: float | None = None,
-                 f107a: float | None = None,
-                 ap: float | None = None,
-                 lat_deg: float = 0.0,
-                 lon_deg: float = 0.0):
+    def __init__(self, config: EnvironmentConfig):
         """Create an atmosphere model.
 
         Parameters
         ----------
-        h_switch : float
-            Altitude [m] at which to switch from the US76-like model to the
-            NRLMSIS 2.1-like model.
-        f107 : float | None
-            10.7 cm solar radio flux index (optional, for NRLMSIS).
-        f107a : float | None
-            81-day average of f10.7 (optional, for NRLMSIS).
-        ap : float | None
-            Geomagnetic index (optional, for NRLMSIS).
-        lat_deg : float
-            Reference latitude in degrees for the high-altitude model.
-        lon_deg : float
-            Reference longitude in degrees for the high-altitude model.
+        config : Config
+            The configuration object.
         """
-        self.h_switch = h_switch
-        self.f107 = f107
-        self.f107a = f107a
-        self.ap = ap
+        self.config = config
+        self.h_switch = config.atmosphere_switch_alt_m
+        self.f107 = config.atmosphere_f107
+        self.f107a = config.atmosphere_f107a
+        self.ap = config.atmosphere_ap
 
         # Fixed reference location for the high-altitude model (NRLMSIS-like)
-        self.lat_deg = lat_deg
-        self.lon_deg = lon_deg
+        self.lat_deg = config.launch_lat_deg
+        self.lon_deg = config.launch_lon_deg
 
     def properties(self, altitude: float, t: float | None = None) -> AtmosphereProperties:
         """Return atmospheric properties at a given altitude.
@@ -99,11 +84,8 @@ class AtmosphereModel:
         """
         props = self.properties(altitude, t)
         # Assuming ideal gas: speed_of_sound = sqrt(gamma * R_specific * T)
-        # where R_specific = R_universal / M_mean
-        gamma = 1.4  # Adiabatic index for air
-        R_universal = 8.314462618  # J/(mol*K)
-        M_mean = 0.0289644         # kg/mol, approximate dry-air molar mass
-        R_specific = R_universal / M_mean # J/(kg*K)
+        gamma = self.config.air_gamma
+        R_specific = self.config.air_gas_constant
         return np.sqrt(gamma * R_specific * props.T)
 
     def _us76_properties(self, altitude: float) -> AtmosphereProperties:
@@ -209,9 +191,11 @@ if __name__ == "__main__":
     altitude.
     """
     import matplotlib.pyplot as plt
+    from .config import EnvironmentConfig
 
+    config = EnvironmentConfig()
     # Create an atmosphere model with default settings.
-    atm = AtmosphereModel(f107=150.0, f107a=150.0, ap=4.0)
+    atm = AtmosphereModel(config)
 
     # Altitude grid: 0--100 km in 5 km steps, then 150--1000 km in 50 km steps.
     altitudes_km = np.concatenate([

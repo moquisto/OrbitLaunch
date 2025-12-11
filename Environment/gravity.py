@@ -142,11 +142,7 @@ def orbital_elements_from_state(r_vec: np.ndarray, v_vec: np.ndarray, mu: float)
     return a, rp, ra
 
 
-# Nominal constants for convenience (can be used by a real implementation)
-MU_EARTH = 3.986_004_418e14  # m^3/s^2
-R_EARTH = 6_371_000.0  # m
-OMEGA_EARTH = np.array([0.0, 0.0, 7.292_115_9e-5])  # rad/s
-J2_EARTH = 1.082_626_68e-3
+
 
 
 if __name__ == "__main__":
@@ -158,13 +154,16 @@ if __name__ == "__main__":
     altitudes, prints a few sample values, and generates basic plots.
     """
     import matplotlib.pyplot as plt
+    from .config import EnvironmentConfig
+
+    config = EnvironmentConfig()
 
     # Create a nominal Earth model.
-    earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
+    earth = EarthModel(mu=config.earth_mu, radius=config.earth_radius_m, omega_vec=np.array(config.earth_omega_vec))
 
     # Radial grid from the surface to 5 Earth radii (in meters).
-    r_vals = np.linspace(R_EARTH, 5.0 * R_EARTH, 200)
-    altitudes_m = r_vals - R_EARTH
+    r_vals = np.linspace(config.earth_radius_m, 5.0 * config.earth_radius_m, 200)
+    altitudes_m = r_vals - config.earth_radius_m
     altitudes_km = altitudes_m / 1000.0
 
     g_magnitudes = []
@@ -185,7 +184,7 @@ if __name__ == "__main__":
     sample_altitudes_km = [0.0, 200.0, 400.0]
     print("Sample gravity and atmosphere velocity values:")
     for h_km in sample_altitudes_km:
-        r = R_EARTH + h_km * 1000.0
+        r = config.earth_radius_m + h_km * 1000.0
         r_vec = np.array([r, 0.0, 0.0])
         g = np.linalg.norm(earth.gravity_accel(r_vec))
         v_atm = np.linalg.norm(earth.atmosphere_velocity(r_vec))

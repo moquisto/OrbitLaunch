@@ -9,132 +9,22 @@ from typing import Callable, Optional, Dict, Any
 
 import numpy as np
 
-from aerodynamics import Aerodynamics, get_wind_at_altitude
-from atmosphere import AtmosphereModel
-from gravity import EarthModel
-from integrators import Integrator, RK4, State
-from rocket import Rocket
-from config import CFG
+from Environment.aerodynamics import Aerodynamics
+from Environment.atmosphere import AtmosphereModel
+from Environment.gravity import EarthModel
+from Hardware.rocket import Rocket
+from .integrators import Integrator, RK4
+from .state import State
+from .telemetry import Logger
+from .config import SimulationConfig
+from Environment.config import EnvironmentConfig
+from Logging.config import LoggingConfig
 
 
 @dataclass
 class ControlCommand:
     throttle: float
     thrust_direction: np.ndarray  # unit vector in ECI
-
-
-class Guidance:
-    """
-    Deterministic guidance: provides throttle and thrust direction.
-    If no pitch/throttle functions are supplied, defaults to prograde thrust
-    and full throttle.
-    """
-
-    def __init__(
-        self,
-        pitch_program: Optional[Callable[[float, State], np.ndarray]] = None,
-        throttle_schedule: Optional[Callable[[float, State], float]] = None,
-    ):
-        self.pitch_program = pitch_program
-        self.throttle_schedule = throttle_schedule
-        self.reset()
-
-    def reset(self):
-        """Reset the internal state of the guidance logic for a new run."""
-        self._stage_start_time = 0.0
-        self._last_stage_index = None
-
-    def compute_command(self, t: float, state: State) -> ControlCommand:
-        stage_idx = int(getattr(state, "stage_index", 0))
-        if self._last_stage_index is None:
-            self._stage_start_time = t
-        elif stage_idx != self._last_stage_index:
-            self._stage_start_time = t
-        self._last_stage_index = stage_idx
-        t_stage = t - self._stage_start_time
-
-        # Thrust direction: user pitch program or prograde / +z fallback.
-        if self.pitch_program is not None:
-            try:
-                direction = np.asarray(
-                    self.pitch_program(t, state, t_stage=t_stage, stage_index=stage_idx),
-                    dtype=float,
-                )
-            except TypeError:
-                direction = np.asarray(self.pitch_program(t, state), dtype=float)
-        else:
-            v = np.asarray(state.v_eci, dtype=float)
-            speed = np.linalg.norm(v)
-            if speed > 0.0:
-                direction = v / speed
-            else:
-                # If stationary, push along local up (radial); fall back to +z only if r is zero.
-                r = np.asarray(state.r_eci, dtype=float)
-                r_norm = np.linalg.norm(r)
-                if r_norm > 0.0:
-                    direction = r / r_norm
-                else:
-                    direction = np.array([0.0, 0.0, 1.0], dtype=float)
-
-        norm = np.linalg.norm(direction)
-        if norm == 0.0:
-            direction = np.array([0.0, 0.0, 1.0], dtype=float)
-            norm = 1.0
-        direction_unit = direction / norm
-
-        # Throttle schedule: user-supplied or full throttle.
-        throttle = 1.0 if self.throttle_schedule is None else float(self.throttle_schedule(t, state))
-        throttle = float(np.clip(throttle, 0.0, 1.0))
-
-        return ControlCommand(throttle=throttle, thrust_direction=direction_unit)
-
-
-class Logger:
-    """
-    Minimal in-memory logger for trajectories.
-    """
-
-    def __init__(self):
-        self.t_sim = []
-        self.t_env = []
-        self.r = []
-        self.v = []
-        self.m = []
-        self.stage = []
-        self.altitude = []
-        self.speed = []
-        self.thrust_mag = []
-        self.drag_mag = []
-        self.mdot = []
-        self.dynamic_pressure = []
-        self.rho = []
-        self.mach = []
-        self.flight_path_angle_deg = []
-        self.v_vertical = []
-        self.v_horizontal = []
-        self.specific_energy = []
-        self.orbit_achieved = False
-        self.cutoff_reason = ""
-
-    def record(self, t_sim: float, t_env: float, state: State, extras: Dict[str, Any]):
-        self.t_sim.append(float(t_sim))
-        self.t_env.append(float(t_env))
-        self.r.append(np.asarray(state.r_eci, dtype=float).copy())
-        self.v.append(np.asarray(state.v_eci, dtype=float).copy())
-        self.m.append(float(state.m))
-        self.stage.append(int(getattr(state, "stage_index", 0)))
-        self.altitude.append(float(extras.get("altitude", 0.0)))
-        self.speed.append(float(extras.get("speed", 0.0)))
-        self.thrust_mag.append(float(extras.get("thrust_mag", 0.0)))
-        self.drag_mag.append(float(extras.get("drag_mag", 0.0)))
-        self.mdot.append(float(extras.get("mdot", 0.0)))
-        self.dynamic_pressure.append(float(extras.get("dynamic_pressure", 0.0)))
-        self.rho.append(float(extras.get("rho", 0.0)))
-        self.mach.append(float(extras.get("mach", 0.0)))
-        self.flight_path_angle_deg.append(float(extras.get("fpa_deg", 0.0)))
-        self.v_vertical.append(float(extras.get("v_vertical", 0.0)))
-        self.v_horizontal.append(float(extras.get("v_horizontal", 0.0)))
-        self.specific_energy.append(float(extras.get("specific_energy", 0.0)))
 
 
 class Simulation:
@@ -144,23 +34,31 @@ class Simulation:
         atmosphere: AtmosphereModel,
         aerodynamics: Aerodynamics,
         rocket: Rocket,
+        sim_config: SimulationConfig,
+        env_config: EnvironmentConfig,
+        log_config: LoggingConfig,
         integrator: Optional[Integrator] = None,
         guidance: Optional[Guidance] = None,
-        max_q_limit: float | None = None,
-        max_accel_limit: float | None = None,
-        impact_altitude_buffer_m: float = -100.0,
-        escape_radius_factor: float = 1.05,
     ):
         self.earth = earth
         self.atmosphere = atmosphere
         self.aero = aerodynamics
         self.rocket = rocket
+        self.sim_config = sim_config
+        self.env_config = env_config
+        self.log_config = log_config
         self.integrator = integrator or RK4()
         self.guidance = guidance or Guidance()
-        self.max_q_limit = max_q_limit
-        self.max_accel_limit = max_accel_limit
-        self.impact_altitude_buffer_m = impact_altitude_buffer_m
-        self.escape_radius_factor = escape_radius_factor
+        
+        # Store relevant config values to avoid passing the whole object around
+        self.max_q_limit = sim_config.max_q_limit
+        self.max_accel_limit = sim_config.max_accel_limit
+        self.impact_altitude_buffer_m = log_config.impact_altitude_buffer_m
+        self.escape_radius_factor = log_config.escape_radius_factor
+        self.use_jet_stream_model = env_config.use_jet_stream_model
+        self.air_gamma = env_config.air_gamma
+        self.air_gas_constant = env_config.air_gas_constant
+
         # Tiny memoization cache for atmospheric properties (cleared each run)
         self._atmo_cache: dict[tuple[float, float], Any] = {}
 
@@ -193,7 +91,7 @@ class Simulation:
         rho = float(props.rho)
         if rho > 0:
             v_atm_rotation = self.earth.atmosphere_velocity(r)
-            wind_vector = get_wind_at_altitude(altitude, r) if CFG.use_jet_stream_model else np.zeros(3)
+            wind_vector = self.aero._get_wind_at_altitude(altitude, r) if self.use_jet_stream_model else np.zeros(3)
             v_air = v_atm_rotation + wind_vector
             v_rel = v - v_air
             q = 0.5 * rho * np.dot(v_rel, v_rel)
@@ -229,7 +127,7 @@ class Simulation:
 
         # Diagnostics
         v_rel_mag = np.linalg.norm(v_rel) if 'v_rel' in locals() else 0.0
-        a_sound = np.sqrt(max(CFG.air_gamma * CFG.air_gas_constant * float(props.T), 0.0))
+        a_sound = np.sqrt(max(self.air_gamma * self.air_gas_constant * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
         v_horiz = float(np.sqrt(max(v_norm**2 - vr**2, 0.0)))
@@ -259,12 +157,6 @@ class Simulation:
         duration: float,
         dt: float,
         state0: State,
-        orbit_target_radius: float | None = None,
-        orbit_speed_tolerance: float = 50.0,
-        orbit_radial_tolerance: float = 50.0,
-        orbit_alt_tolerance: float = 500.0,
-        exit_on_orbit: bool = True,
-        post_orbit_coast_s: float = 0.0,
     ) -> Logger:
         """
         March the simulation forward from t0 to tf with fixed step dt.
@@ -274,9 +166,10 @@ class Simulation:
         t_env = float(t_env_start)
         t_end_sim = duration
         state = state0
-        
+    
         # Reset stateful components for a fresh run.
-        self.rocket.reset()
+        if hasattr(self.rocket, "reset"):
+            self.rocket.reset()
         self.guidance.reset()
         self._atmo_cache.clear()
         
@@ -319,26 +212,26 @@ class Simulation:
             # --- TERMINATION & EVENT CHECKS ---
 
             # 1. ORBIT ACHIEVED
-            if orbit_target_radius is not None and orbit_coast_end is None:
+            if self.sim_config.target_orbit_alt_m is not None and orbit_coast_end is None:
                 r_norm = np.linalg.norm(state.r_eci)
                 v_norm = np.linalg.norm(state.v_eci)
                 r_hat = state.r_eci / r_norm
                 vr = float(np.dot(state.v_eci, r_hat))
-                v_circ = np.sqrt(self.earth.mu / orbit_target_radius)
+                v_circ = np.sqrt(self.earth.mu / self.sim_config.target_orbit_alt_m)
                 if (
-                    abs(r_norm - orbit_target_radius) <= orbit_alt_tolerance
-                    and abs(v_norm - v_circ) <= orbit_speed_tolerance
-                    and abs(vr) <= orbit_radial_tolerance
+                    abs(r_norm - self.sim_config.target_orbit_alt_m) <= self.sim_config.orbit_alt_tol
+                    and abs(v_norm - v_circ) <= self.sim_config.orbit_speed_tol
+                    and abs(vr) <= self.sim_config.orbit_radial_tol
                 ):
                     logger.orbit_achieved = True
                     logger.cutoff_reason = "orbit_target_met"
-                    if exit_on_orbit:
-                        if post_orbit_coast_s > 0.0:
-                            orbit_coast_end = t_sim + post_orbit_coast_s
+                    if self.sim_config.exit_on_orbit:
+                        if self.sim_config.post_orbit_coast_s > 0.0:
+                            orbit_coast_end = t_sim + self.sim_config.post_orbit_coast_s
                         else:
                             break
                     else:
-                        orbit_coast_end = t_end_sim if post_orbit_coast_s <= 0.0 else t_sim + post_orbit_coast_s
+                        orbit_coast_end = t_end_sim if self.sim_config.post_orbit_coast_s <= 0.0 else t_sim + self.sim_config.post_orbit_coast_s
 
             if orbit_coast_end is not None and t_sim >= orbit_coast_end:
                 logger.cutoff_reason = "coast_complete"

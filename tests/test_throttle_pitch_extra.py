@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 
-from main import ParameterizedThrottleProgram
-from custom_guidance import create_pitch_program_callable
+from custom_guidance import ParameterizedThrottleProgram, create_pitch_program_callable
 
 
 def test_upper_stage_throttle_interpolation():

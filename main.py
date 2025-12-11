@@ -12,222 +12,145 @@ from __future__ import annotations
 import datetime as dt
 import importlib
 import numpy as np
-
-from aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
-from atmosphere import AtmosphereModel
-from gravity import EarthModel, orbital_elements_from_state
-from integrators import RK4, VelocityVerlet, State
-from rocket import Engine, Rocket, Stage
-from simulation import Guidance, Simulation
-from config import CFG
 from typing import Tuple
 
-class StageAwarePitchProgram:
-    """
-    Interpolates pitch angle schedules based on time, separately for booster and upper stage.
-    Schedules are lists of [time_s, angle_deg] pairs, where time is measured from the
-    start of that stage (liftoff for booster, upper ignition for upper stage).
-    Angle is degrees from the local horizontal (0=horizontal, 90=vertical).
-    After the last point, transitions to prograde if speed exceeds the threshold, otherwise holds horizontal.
-    """
+from Environment.aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
+from Environment.atmosphere import AtmosphereModel
+from Environment.gravity import EarthModel, orbital_elements_from_state
+from Environment.config import EnvironmentConfig
 
-    def __init__(
-        self,
-        booster_schedule: list[list[float]],
-        upper_schedule: list[list[float]],
-        prograde_threshold: float,
-        earth_radius: float,
-    ):
-        self.booster_time_points, self.booster_angles_rad = self._prep_schedule(booster_schedule)
-        self.upper_time_points, self.upper_angles_rad = self._prep_schedule(upper_schedule)
-        self.prograde_threshold = prograde_threshold
-        self.earth_radius = earth_radius
+from Hardware.rocket import Rocket
+from Hardware.stage import Stage
+from Hardware.engine import Engine
+from Hardware.config import HardwareConfig
 
-    @staticmethod
-    def _prep_schedule(schedule: list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
-        if not schedule:
-            return np.array([0.0]), np.array([np.pi / 2])
-        sorted_sched = sorted(schedule, key=lambda p: p[0])
-        times = np.array([p[0] for p in sorted_sched], dtype=float)
-        angles = np.deg2rad([p[1] for p in sorted_sched])
-        return times, angles
+from Software.guidance import Guidance, StageAwarePitchProgram, ParameterizedThrottleProgram
+from Software.config import SoftwareConfig
 
-    def __call__(self, t: float, state: State, t_stage: float | None = None, stage_index: int | None = None) -> np.ndarray:
-        r = np.asarray(state.r_eci, dtype=float)
-        v = np.asarray(state.v_eci, dtype=float)
-        r_norm = np.linalg.norm(r)
-        if r_norm == 0.0:
-            return np.array([0.0, 0.0, 1.0], dtype=float)
-        r_hat = r / r_norm
+from Main.integrators import RK4, VelocityVerlet
+from Main.state import State
+from Main.simulation import Simulation
+from Main.config import SimulationConfig
 
-        # Define local orientation vectors (up, east)
-        east = np.cross([0.0, 0.0, 1.0], r_hat)
-        east_norm = np.linalg.norm(east)
-        east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
+from Logging.config import LoggingConfig
+from Analysis.config import AnalysisConfig
 
-        idx = 0 if stage_index is None else int(stage_index)
-        time_points = self.booster_time_points if idx == 0 else self.upper_time_points
-        angle_points = self.booster_angles_rad if idx == 0 else self.upper_angles_rad
+# Main orchestrator function (will be implemented next)
+def main_orchestrator():
+    # 1. Instantiate all config objects
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sw_config = SoftwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    analysis_config = AnalysisConfig()
 
-        t_rel = t if t_stage is None else float(t_stage)
-        final_time = time_points[-1]
+    # 2. Instantiate core components
+    # Environment
+    earth = EarthModel(
+        mu=env_config.earth_mu,
+        radius=env_config.earth_radius_m,
+        omega_vec=np.array(env_config.earth_omega_vec, dtype=float),
+        j2=env_config.j2_coeff if env_config.use_j2 else None,
+    )
+    atmosphere = AtmosphereModel(env_config)
+    cd_model = CdModel(mach_dependent_cd, env_config)
+    aero = Aerodynamics(
+        atmosphere=atmosphere,
+        cd_model=cd_model,
+        config=env_config, # Passing env_config as config to Aerodynamics.init
+        reference_area=None # Will be determined by rocket stage
+    )
 
-        if t_rel > final_time:
-            speed = np.linalg.norm(v)
-            if speed > self.prograde_threshold:
-                direction = v / speed
-            else:
-                direction = east
-        else:
-            pitch_rad = np.interp(t_rel, time_points, angle_points)
-            direction = np.cos(pitch_rad) * east + np.sin(pitch_rad) * r_hat
-
-        n = np.linalg.norm(direction)
-        return direction / n if n > 0.0 else r_hat
-
-
-def throttle_schedule(t: float, state: State) -> float:
-    """Hold full throttle; adapt here if you want to throttle for max-Q, etc."""
-    return CFG.base_throttle_cmd
-
-
-class ParameterizedThrottleProgram:
-    """
-    Interpolates a throttle schedule for the upper stage based on time since
-    ignition. The schedule is a list of [time_sec, throttle_level] pairs.
-    """
-
-    def __init__(self, schedule: list[list[float]], apply_to_stage0: bool = False):
-        self.schedule = sorted(schedule, key=lambda p: p[0])
-        self.time_points = np.array([p[0] for p in self.schedule])
-        self.throttle_points = np.array([p[1] for p in self.schedule])
-        # When true, reuse this interpolator for the booster as well (using absolute time).
-        self.apply_to_stage0 = apply_to_stage0
-
-    def __call__(self, t: float, state: State) -> float:
-        stage_idx = getattr(state, "stage_index", 0)
-        if stage_idx == 0:
-            if not self.apply_to_stage0:
-                return 1.0  # Booster always full throttle
-            throttle = np.interp(
-                t,
-                self.time_points,
-                self.throttle_points,
-                left=self.throttle_points[0],
-                right=self.throttle_points[-1],
-            )
-            return float(throttle)
-
-        ignition_time = getattr(state, "upper_ignition_start_time", None)
-        if ignition_time is None:
-            return 0.0  # Not yet ignited
-
-        time_since_ignition = t - ignition_time
-        if time_since_ignition < 0:
-            return 0.0
-
-        # Interpolate throttle level from the schedule
-        throttle = np.interp(
-            time_since_ignition, self.time_points, self.throttle_points, left=0.0, right=0.0
-        )
-        return float(throttle)
-
-
-def build_rocket() -> Rocket:
-    # Approximate BFR-like stages (order-of-magnitude values)
+    # Hardware (Rocket)
     booster_engine = Engine(
-        thrust_vac=CFG.booster_thrust_vac,
-        thrust_sl=CFG.booster_thrust_sl,
-        isp_vac=CFG.booster_isp_vac,
-        isp_sl=CFG.booster_isp_sl,
+        thrust_vac=hw_config.booster_thrust_vac,
+        thrust_sl=hw_config.booster_thrust_sl,
+        isp_vac=hw_config.booster_isp_vac,
+        isp_sl=hw_config.booster_isp_sl,
+        p_sl=env_config.P_SL, # From EnvironmentConfig
     )
     upper_engine = Engine(
-        thrust_vac=CFG.upper_thrust_vac,
-        thrust_sl=CFG.upper_thrust_sl,
-        isp_vac=CFG.upper_isp_vac,
-        isp_sl=CFG.upper_isp_sl,
+        thrust_vac=hw_config.upper_thrust_vac,
+        thrust_sl=hw_config.upper_thrust_sl,
+        isp_vac=hw_config.upper_isp_vac,
+        isp_sl=hw_config.upper_isp_sl,
+        p_sl=env_config.P_SL, # From EnvironmentConfig
     )
 
     booster_stage = Stage(
-        dry_mass=CFG.booster_dry_mass,
-        prop_mass=CFG.booster_prop_mass,
+        dry_mass=hw_config.booster_dry_mass,
+        prop_mass=hw_config.booster_prop_mass,
         engine=booster_engine,
-        ref_area=CFG.ref_area_m2,
+        ref_area=hw_config.ref_area_m2,
     )
     upper_stage = Stage(
-        dry_mass=CFG.upper_dry_mass,
-        prop_mass=CFG.upper_prop_mass,
+        dry_mass=hw_config.upper_dry_mass,
+        prop_mass=hw_config.upper_prop_mass,
         engine=upper_engine,
-        ref_area=CFG.ref_area_m2,
+        ref_area=hw_config.ref_area_m2,
     )
 
-    booster_program_cfg = CFG.booster_throttle_program
-    if isinstance(booster_program_cfg, (list, tuple, np.ndarray)):
-        booster_program_cfg = ParameterizedThrottleProgram(
-            schedule=booster_program_cfg, apply_to_stage0=True
-        )
+    rocket_stages = [booster_stage, upper_stage]
 
-    return Rocket(
-        stages=[booster_stage, upper_stage],
-        main_engine_ramp_time=CFG.main_engine_ramp_time,
-        upper_engine_ramp_time=CFG.upper_engine_ramp_time,
-        meco_mach=CFG.meco_mach,
-        separation_delay=CFG.separation_delay_s,
-        upper_ignition_delay=CFG.upper_ignition_delay_s,
-        separation_altitude_m=CFG.separation_altitude_m,  # stage on depletion trigger, but separation is time-based
-        earth_radius=CFG.earth_radius_m,
-        min_throttle=CFG.engine_min_throttle,
-        shutdown_ramp_time=CFG.engine_shutdown_ramp_s,
-        throttle_shape_full_threshold=CFG.throttle_full_shape_threshold,
-
-        booster_throttle_program=booster_program_cfg,
-    )
-
-
-def build_simulation() -> tuple[Simulation, State, float]:
-    earth = EarthModel(
-        mu=CFG.earth_mu,
-        radius=CFG.earth_radius_m,
-        omega_vec=np.array(CFG.earth_omega_vec, dtype=float),
-        j2=CFG.j2_coeff if CFG.use_j2 else None,
-    )
-    atmosphere = AtmosphereModel(
-        h_switch=CFG.atmosphere_switch_alt_m,
-        lat_deg=CFG.launch_lat_deg,
-        lon_deg=CFG.launch_lon_deg,
-        f107=CFG.atmosphere_f107,
-        f107a=CFG.atmosphere_f107a,
-        ap=CFG.atmosphere_ap,
-    )
-    cd_model = CdModel(mach_dependent_cd)
-    rocket = build_rocket()
-    aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
-    # --- Pitch Program Selection ---
-    if CFG.pitch_guidance_mode == 'parameterized':
+    # Software (Guidance)
+    # Pitch Program Selection
+    if sw_config.pitch_guidance_mode == 'parameterized':
         pitch_program = StageAwarePitchProgram(
-            booster_schedule=CFG.pitch_program,
-            upper_schedule=getattr(CFG, "upper_pitch_program", CFG.pitch_program),
-            prograde_threshold=CFG.pitch_prograde_speed_threshold,
-            earth_radius=CFG.earth_radius_m,
+            sw_config=sw_config, # Pass SoftwareConfig
+            env_config=env_config # Pass EnvironmentConfig
         )
-    elif CFG.pitch_guidance_mode == 'function':
+    elif sw_config.pitch_guidance_mode == 'function':
         try:
-            module_name, func_name = CFG.pitch_guidance_function.rsplit('.', 1)
+            module_name, func_name = sw_config.pitch_guidance_function.rsplit('.', 1)
             module = importlib.import_module(module_name)
             pitch_program = getattr(module, func_name)
         except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load pitch guidance function '{CFG.pitch_guidance_function}': {e}")
+            raise ImportError(f"Could not load pitch guidance function '{sw_config.pitch_guidance_function}': {e}")
     else:
-        raise ValueError(f"Unknown pitch_guidance_mode: '{CFG.pitch_guidance_mode}'")
+        raise ValueError(f"Unknown pitch_guidance_mode: '{sw_config.pitch_guidance_mode}'")
+    
+    # Throttle Controller Selection (for sim.guidance.throttle_schedule)
+    throttle_controller = None
+    if sw_config.throttle_guidance_mode == 'parameterized':
+        # ParameterizedThrottleProgram expects a schedule directly
+        # The main.py will decide which schedule to pass (booster or upper)
+        # Here we only instantiate the upper stage one as per original design.
+        throttle_controller = ParameterizedThrottleProgram(schedule=sw_config.upper_stage_throttle_program)
+    elif sw_config.throttle_guidance_mode == 'function':
+        try:
+            module_name, class_name = sw_config.throttle_guidance_function_class.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            ControllerClass = getattr(module, class_name)
+            # The original controller class requires target_radius and mu
+            target_radius = env_config.earth_radius_m + sim_config.target_orbit_alt_m
+            throttle_controller = ControllerClass(target_radius=target_radius, mu=env_config.earth_mu)
+        except (ImportError, AttributeError, ValueError) as e:
+            raise ImportError(f"Could not load throttle guidance class '{sw_config.throttle_guidance_function_class}': {e}")
+    else:
+        raise ValueError(f"Unknown throttle_guidance_mode: '{sw_config.throttle_guidance_mode}'")
 
-    guidance = Guidance(pitch_program=pitch_program, throttle_schedule=throttle_schedule)
-    integrator_name = str(getattr(CFG, "integrator", "rk4")).lower()
+
+    guidance = Guidance(pitch_program=pitch_program, throttle_schedule=throttle_controller)
+
+    # Rocket instance
+    rocket = Rocket(
+        stages=rocket_stages,
+        hw_config=hw_config,
+        env_config=env_config,
+        booster_throttle_program=ParameterizedThrottleProgram(schedule=sw_config.booster_throttle_program) # Pass booster program
+    )
+
+    # Integrator
+    integrator_name = str(getattr(sim_config, "integrator", "rk4")).lower()
     if integrator_name in ("rk4", "runge-kutta", "rk"):
         integrator = RK4()
     elif integrator_name in ("velocity_verlet", "verlet", "vv"):
         integrator = VelocityVerlet()
     else:
-        raise ValueError(f"Unknown integrator '{CFG.integrator}'. Expected 'rk4' or 'velocity_verlet'.")
+        raise ValueError(f"Unknown integrator '{sim_config.integrator}'. Expected 'rk4' or 'velocity_verlet'.")
+
+    # Simulation
     sim = Simulation(
         earth=earth,
         atmosphere=atmosphere,
@@ -235,66 +158,71 @@ def build_simulation() -> tuple[Simulation, State, float]:
         rocket=rocket,
         integrator=integrator,
         guidance=guidance,
-        max_q_limit=CFG.max_q_limit,
-        max_accel_limit=CFG.max_accel_limit,
-        impact_altitude_buffer_m=CFG.impact_altitude_buffer_m,
-        escape_radius_factor=CFG.escape_radius_factor,
+        sim_config=sim_config,
+        env_config=env_config,
+        log_config=log_config,
     )
 
     # Initial state: surface at launch site, co-rotating atmosphere
-    lat = np.deg2rad(CFG.launch_lat_deg)
-    lon = np.deg2rad(CFG.launch_lon_deg)
-    r0 = CFG.earth_radius_m * np.array(
+    lat = np.deg2rad(env_config.launch_lat_deg)
+    lon = np.deg2rad(env_config.launch_lon_deg)
+    r0 = env_config.earth_radius_m * np.array(
         [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
         dtype=float,
     )
     v0 = earth.atmosphere_velocity(r0)  # start with Earth's rotation speed
-    m0 = sum(stage.total_mass() for stage in rocket.stages)
+    m0 = sum(stage.total_mass() for stage in rocket_stages)
     state0 = State(r_eci=r0, v_eci=v0, m=m0, stage_index=0)
 
     # Use a constant start time for deterministic runs.
     t0 = 0.0
 
-    return sim, state0, t0
+    return sim, state0, t0, log_config, analysis_config
 
 
-def main():
-    sim, state0, t_env0 = build_simulation()
-    duration = CFG.main_duration_s
-    dt = CFG.main_dt_s
+
+
+
+
+def run_simulation_and_get_log(sim: Simulation, state0: State, t_env0: float):
+    """Runs the simulation and returns the log."""
+    duration = sim.sim_config.main_duration_s
+    dt = sim.sim_config.main_dt_s
 
     # --- Throttle Controller Selection ---
-    orbit_radius = CFG.earth_radius_m + CFG.target_orbit_alt_m
-    if CFG.throttle_guidance_mode == 'parameterized':
-        controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
-    elif CFG.throttle_guidance_mode == 'function':
+    orbit_radius = sim.env_config.earth_radius_m + sim.sim_config.target_orbit_alt_m
+    if sim.sw_config.throttle_guidance_mode == 'parameterized':
+        # ParameterizedThrottleProgram expects a schedule directly
+        # The main.py will decide which schedule to pass (booster or upper)
+        throttle_controller = ParameterizedThrottleProgram(schedule=sim.sw_config.upper_stage_throttle_program)
+    elif sim.sw_config.throttle_guidance_mode == 'function':
         try:
-            module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+            module_name, class_name = sim.sw_config.throttle_guidance_function_class.rsplit('.', 1)
             module = importlib.import_module(module_name)
             ControllerClass = getattr(module, class_name)
             # The original controller class requires target_radius and mu
-            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+            throttle_controller = ControllerClass(target_radius=orbit_radius, mu=sim.env_config.earth_mu)
         except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load throttle guidance class '{CFG.throttle_guidance_function_class}': {e}")
+            raise ImportError(f"Could not load throttle guidance class '{sim.sw_config.throttle_guidance_function_class}': {e}")
     else:
-        raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+        raise ValueError(f"Unknown throttle_guidance_mode: '{sim.sw_config.throttle_guidance_mode}'")
 
-    sim.guidance.throttle_schedule = controller
+    sim.guidance.throttle_schedule = throttle_controller
     log = sim.run(
         t_env0,
         duration,
         dt,
         state0,
-        orbit_target_radius=orbit_radius,
-        orbit_speed_tolerance=CFG.orbit_speed_tol,
-        orbit_radial_tolerance=CFG.orbit_radial_tol,
-        orbit_alt_tolerance=CFG.orbit_alt_tol,
-        exit_on_orbit=CFG.exit_on_orbit,
-        post_orbit_coast_s=CFG.post_orbit_coast_s,
     )
+    return log
 
-    # --- Summary ---
-    
+def main():
+    config = Config()
+    sim, state0, t_env0 = build_simulation(config)
+    log = run_simulation_and_get_log(sim, state0, t_env0, config)
+
+def print_summary(log, sim, log_config, analysis_config):
+    """Prints a summary of the simulation results."""
     def format_dist(val_km):
         """Helper to format distance values that could be None or infinity."""
         if val_km is None:
@@ -303,7 +231,7 @@ def main():
             return "inf"
         return f"{val_km:.2f}"
 
-    earth_radius = CFG.earth_radius_m
+    earth_radius = sim.env_config.earth_radius_m
     final_alt_km = (np.linalg.norm(log.r[-1]) - earth_radius) / 1000.0
     final_speed = np.linalg.norm(log.v[-1])
     final_mass = log.m[-1]
@@ -314,7 +242,7 @@ def main():
     stage_switch_times = [log.t_sim[i] for i in range(1, len(log.stage)) if log.stage[i] != log.stage[i - 1]]
     
     # Basic orbital diagnostics from final state
-    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], CFG.earth_mu)
+    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], sim.env_config.earth_mu)
     rp_alt_km = (rp - earth_radius) / 1000.0 if rp is not None else None
     ra_alt_km = (ra - earth_radius) / 1000.0 if ra is not None else None
     
@@ -328,7 +256,7 @@ def main():
             print(f"{label}: Log data not available.")
             return
             
-        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], CFG.earth_mu)
+        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], sim.env_config.earth_mu)
         rp_alt_i = (rp_i - earth_radius) / 1000.0 if rp_i is not None else None
         ra_alt_i = (ra_i - earth_radius) / 1000.0 if ra_i is not None else None
         
@@ -382,148 +310,22 @@ def main():
     print_state("Max speed", idx_max_speed)
     print_state("Upper engine off", idx_upper_off)
 
-    save_log_to_txt(log, CFG.log_filename)
+def main():
+    sim, state0, t_env0, log_config, analysis_config = main_orchestrator()
+    log = run_simulation_and_get_log(sim, state0, t_env0)
+    print_summary(log, sim, log_config, analysis_config)
+
+    save_log_to_txt(log, log_config.log_filename)
     # Enable static trajectory plot; keep animation disabled for headless use.
-    if CFG.plot_trajectory:
-        plot_trajectory_3d(log, CFG.earth_radius_m)
-    if CFG.animate_trajectory:
-        animate_trajectory(log, CFG.earth_radius_m)
+    if log_config.plot_trajectory:
+        plot_trajectory_3d(log, sim.env_config.earth_radius_m)
+    if log_config.animate_trajectory:
+        animate_trajectory(log, sim.env_config.earth_radius_m)
+
+from Analysis.plotting import plot_trajectory_3d, animate_trajectory
 
 
-def plot_trajectory_3d(log, r_earth: float):
-    """Static 3D plot of trajectory around a spherical Earth."""
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Line3DCollection
-    positions = np.array(log.r)
-    times = np.array(log.t_sim)
-
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Earth sphere (light, semi-transparent) and wireframe for context
-    u = np.linspace(0, 2 * np.pi, 50)
-    v = np.linspace(0, np.pi, 25)
-    x = r_earth * np.outer(np.cos(u), np.sin(v))
-    y = r_earth * np.outer(np.sin(u), np.sin(v))
-    z = r_earth * np.outer(np.ones_like(u), np.cos(v))
-    ax.plot_surface(x, y, z, cmap="Blues", alpha=0.1, linewidth=0, antialiased=False)
-    ax.plot_wireframe(x, y, z, color="lightblue", alpha=0.2, linewidth=0.3)
-
-    # Trajectory with time-based color gradient
-    if positions.shape[0] > 1:
-        segments = np.stack([positions[:-1], positions[1:]], axis=1)
-        t_norm = (times - times.min()) / max(times.ptp(), 1e-9)
-        colors = plt.cm.plasma(t_norm[:-1])
-        lc = Line3DCollection(segments, colors=colors, linewidths=2, label="Trajectory")
-        ax.add_collection3d(lc)
-    else:
-        ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], color="tab:red", label="Trajectory", lw=2)
-    ax.scatter(positions[0, 0], positions[0, 1], positions[0, 2], color="green", s=30, label="Launch")
-    ax.scatter(positions[-1, 0], positions[-1, 1], positions[-1, 2], color="black", s=30, label="Final")
-
-    # Symmetric limits based on max radial distance
-    r_max = max(np.linalg.norm(p) for p in positions)
-    lim = 1.05 * max(r_earth, r_max)
-    ax.set_xlim(-lim, lim)
-    ax.set_ylim(-lim, lim)
-    ax.set_zlim(-lim, lim)
-
-    ax.set_box_aspect((1, 1, 1))
-    ax.view_init(elev=25, azim=35)
-    ax.set_xlabel("x [m]")
-    ax.set_ylabel("y [m]")
-    ax.set_zlabel("z [m]")
-    ax.set_title("3D Trajectory")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-
-def animate_trajectory(log, r_earth: float):
-    """Simple 3D animation of the trajectory."""
-    import matplotlib.pyplot as plt
-    from matplotlib import animation
-    positions = np.array(log.r)
-    if positions.shape[0] < 2:
-        return
-
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Earth sphere
-    u = np.linspace(0, 2 * np.pi, 50)
-    v = np.linspace(0, np.pi, 25)
-    x = r_earth * np.outer(np.cos(u), np.sin(v))
-    y = r_earth * np.outer(np.sin(u), np.sin(v))
-    z = r_earth * np.outer(np.ones_like(u), np.cos(v))
-    ax.plot_surface(x, y, z, cmap="Blues", alpha=0.05, linewidth=0, antialiased=False)
-    ax.plot_wireframe(x, y, z, color="lightblue", alpha=0.2, linewidth=0.3)
-
-    traj_line, = ax.plot([], [], [], color="tab:red", lw=2)
-    point, = ax.plot([], [], [], "o", color="black", markersize=5)
-
-    r_max = max(np.linalg.norm(p) for p in positions)
-    lim = 1.05 * max(r_earth, r_max)
-    ax.set_xlim(-lim, lim)
-    ax.set_ylim(-lim, lim)
-    ax.set_zlim(-lim, lim)
-
-    ax.set_box_aspect((1, 1, 1))
-    ax.view_init(elev=25, azim=35)
-
-    def init():
-        traj_line.set_data([], [])
-        traj_line.set_3d_properties([])
-        point.set_data([], [])
-        point.set_3d_properties([])
-        return traj_line, point
-
-    def update(frame):
-        traj_line.set_data(positions[: frame + 1, 0], positions[: frame + 1, 1])
-        traj_line.set_3d_properties(positions[: frame + 1, 2])
-        point.set_data([positions[frame, 0]], [positions[frame, 1]])
-        point.set_3d_properties([positions[frame, 2]])
-        return traj_line, point
-
-    ani = animation.FuncAnimation(
-        fig,
-        update,
-        frames=len(positions),
-        init_func=init,
-        interval=50,
-        blit=True,
-        repeat=False,
-    )
-    ax.set_title("Trajectory Animation")
-    plt.show()
-
-
-
-def save_log_to_txt(log, filename: str):
-    """Write simulation states to a text (CSV-style) file for analysis."""
-    with open(filename, "w") as f:
-        f.write(
-            "# t_sim_s,t_env_s,alt_m,speed_mps,mass_kg,stage,"
-            "thrust_N,drag_N,mdot_kgps,q_Pa,rho_kgpm3,mach,"
-            "fpa_deg,v_vertical_mps,v_horizontal_mps,specific_energy_Jpkg,"
-            "pos_x_m,pos_y_m,pos_z_m,vel_x_mps,vel_y_mps,vel_z_mps\n"
-        )
-        n = len(log.t_sim)
-        for i in range(n):
-            r = log.r[i]
-            v = log.v[i]
-            f.write(
-                f"{log.t_sim[i]:.3f},{log.t_env[i]:.3f},"
-                f"{log.altitude[i]:.3f},{log.speed[i]:.3f},"
-                f"{log.m[i]:.3f},{log.stage[i]},"
-                f"{log.thrust_mag[i]:.3f},{log.drag_mag[i]:.3f},"
-                f"{log.mdot[i]:.6f},{log.dynamic_pressure[i]:.3f},"
-                f"{log.rho[i]:.6e},{log.mach[i]:.3f},"
-                f"{log.flight_path_angle_deg[i]:.3f},{log.v_vertical[i]:.3f},{log.v_horizontal[i]:.3f},{log.specific_energy[i]:.3f},"
-                f"{r[0]:.3f},{r[1]:.3f},{r[2]:.3f},"
-                f"{v[0]:.3f},{v[1]:.3f},{v[2]:.3f}\n"
-            )
-    print(f"Saved simulation log to {filename}")
+from Logging.generate_logs import save_log_to_txt
 
 
 if __name__ == "__main__":

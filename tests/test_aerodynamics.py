@@ -1,7 +1,7 @@
 import numpy as np
 
-from aerodynamics import Aerodynamics, CdModel, get_wind_at_altitude
-from config import CFG
+from Environment.aerodynamics import Aerodynamics, CdModel, get_wind_at_altitude
+from Environment.config import EnvironmentConfig
 
 
 class DummyAtmosphere:
@@ -28,10 +28,11 @@ class DummyRocket:
 
 
 def test_drag_force_nonzero(monkeypatch):
-    monkeypatch.setattr(CFG, "use_jet_stream_model", False)
+    config = EnvironmentConfig()
+    config.use_jet_stream_model = False
     atmo = DummyAtmosphere(rho=1.0, T=300.0, p=0.0)
     earth = DummyEarth(radius=1000.0)
-    aero = Aerodynamics(atmosphere=atmo, cd_model=CdModel(2.0))
+    aero = Aerodynamics(atmosphere=atmo, cd_model=CdModel(2.0, config), config=config)
     rocket = DummyRocket()
 
     state = type("S", (), {})()
@@ -44,13 +45,14 @@ def test_drag_force_nonzero(monkeypatch):
 
 
 def test_wind_profile_interpolation(monkeypatch):
-    monkeypatch.setattr(CFG, "wind_alt_points", [0.0, 10_000.0, 20_000.0])
-    monkeypatch.setattr(CFG, "wind_speed_points", [0.0, 50.0, 0.0])
-    monkeypatch.setattr(CFG, "wind_direction_vec", [0.0, 1.0, 0.0])
+    config = EnvironmentConfig()
+    config.wind_alt_points = [0.0, 10_000.0, 20_000.0]
+    config.wind_speed_points = [0.0, 50.0, 0.0]
+    config.wind_direction_vec = [0.0, 1.0, 0.0]
 
-    low = get_wind_at_altitude(0.0)
-    mid = get_wind_at_altitude(10_000.0)
-    high = get_wind_at_altitude(20_000.0)
+    low = get_wind_at_altitude(0.0, config)
+    mid = get_wind_at_altitude(10_000.0, config)
+    high = get_wind_at_altitude(20_000.0, config)
 
     np.testing.assert_allclose(low, np.array([0.0, 0.0, 0.0]), atol=1e-6)
     np.testing.assert_allclose(mid, np.array([0.0, 50.0, 0.0]), atol=1e-6)

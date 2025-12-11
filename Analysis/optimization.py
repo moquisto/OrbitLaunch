@@ -12,10 +12,18 @@ import multiprocessing
 import os
 import numpy as np
 from scipy.optimize import differential_evolution
-from main import build_simulation, ParameterizedThrottleProgram
-from gravity import MU_EARTH, R_EARTH, orbital_elements_from_state
-from config import CFG
-from custom_guidance import create_pitch_program_callable
+
+# New imports
+from main import main_orchestrator
+from Environment.gravity import orbital_elements_from_state
+from Environment.config import EnvironmentConfig
+from Hardware.config import HardwareConfig
+from Software.config import SoftwareConfig
+from Main.config import SimulationConfig
+from Logging.config import LoggingConfig
+from Analysis.config import AnalysisConfig
+from Software.guidance import create_pitch_program_callable, ParameterizedThrottleProgram
+
 import traceback
 
 try:
@@ -44,104 +52,69 @@ global_iter_count = Counter(0)
 bounds = []
 
 
+class ObjectiveFunctionWrapper:
+    def __init__(self, phase, env_config, hw_config, sw_config, sim_config, log_config, analysis_config, bounds):
+        self.phase = phase
+        self.env_config = env_config
+        self.hw_config = hw_config
+        self.sw_config = sw_config
+        self.sim_config = sim_config
+        self.log_config = log_config
+        self.analysis_config = analysis_config
+        self.bounds = bounds
+
+    def __call__(self, scaled_params: np.ndarray):
+        global global_iter_count
+        global_iter_count.value += 1
+        
+        params_obj = OptimizationParams(*scaled_params)
+        results = run_simulation_wrapper(
+            params_obj,
+            self.env_config,
+            self.hw_config,
+            self.sw_config,
+            self.sim_config,
+            self.log_config
+        )
+        
+        if self.phase == 1:
+            results['cost'] = results['error']
+            bound_penalty = soft_bounds_penalty(scaled_params, self.bounds)
+            results['cost'] += bound_penalty
+
+            log_iteration("Phase 1", global_iter_count.value, params_obj, results)
+            print(
+                f"[Phase 1] Iter {global_iter_count.value:3d} | Error: {results['error']/1000:.1f} km | Status: {results['status']}", flush=True)
+
+            return results['cost']
+        else:
+            fuel, error = results["fuel"], results["error"]
+            if error > TARGET_TOLERANCE_M:
+                penalty = (error - TARGET_TOLERANCE_M) * 10.0
+                cost = fuel + penalty
+            else:
+                cost = fuel
+            
+            bound_penalty = soft_bounds_penalty(scaled_params, self.bounds)
+            cost += bound_penalty
+            results['cost'] = cost
+
+            log_iteration("Phase 2", global_iter_count.value, params_obj, results)
+            print(f"[Phase 2] Iter {global_iter_count.value:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", flush=True)
+
+            return cost
+
 def _evaluate_candidate(args):
     """Helper for multiprocessing pool; keeps objective picklable and guarded."""
-    objective_fn, cand, bnds = args
+    objective_fn_wrapper, cand, bnds = args
     # Ensure spawned workers see the current bounds snapshot
     global bounds
     bounds = bnds
     try:
-        return float(objective_fn(np.array(cand, dtype=float)))
+        return float(objective_fn_wrapper(np.array(cand, dtype=float)))
     except Exception as exc:  # pragma: no cover - defensive logging for worker issues
         print(f"[CMA worker] candidate failed: {exc}", flush=True)
         return PENALTY_CRASH
-
-
-def build_default_params_from_config():
-    """Construct a starting parameter vector derived from the active CFG programs."""
-
-    def pick_pitch_points(schedule, count, default_angle=0.0):
-        times = []
-        angles = []
-        for t, ang in schedule[:count]:
-            times.append(float(t))
-            angles.append(float(ang))
-        # Pad if not enough points
-        while len(times) < count:
-            times.append(times[-1] + 20.0 if times else 0.0)
-            angles.append(default_angle)
-        return times[:count], angles[:count]
-
-    booster_pitch_times, booster_pitch_angles = pick_pitch_points(CFG.pitch_program, 5, default_angle=0.0)
-    upper_pitch_times, upper_pitch_angles = pick_pitch_points(CFG.upper_pitch_program, 3, default_angle=0.0)
-
-    def throttle_to_levels_and_ratios(schedule, desired_levels=4):
-        """Convert an absolute time schedule to evenly clipped levels/ratios."""
-        levels = []
-        times = []
-        for t, lvl in schedule:
-            times.append(float(t))
-            levels.append(float(lvl))
-        if not times:
-            return [1.0] * desired_levels, [0.2, 0.5, 0.8]
-        burn_duration = max(times)
-        # Normalize switch times to ratios, ensure we have desired_levels entries
-        ratios = []
-        prev_level = levels[0]
-        prev_time = times[0]
-        norm_switches = []
-        for t, lvl in zip(times[1:], levels[1:]):
-            if lvl != prev_level:
-                norm_switches.append(max(0.0, min(0.99, t / burn_duration if burn_duration > 0 else 0.0)))
-                prev_level = lvl
-                prev_time = t
-        # Build levels list by sampling the schedule at switch points (clipped to [0,1])
-        sampled_levels = []
-        last_idx = 0
-        unique_switches = []
-        for sw in norm_switches:
-            if unique_switches and abs(unique_switches[-1] - sw) < 1e-6:
-                continue
-            unique_switches.append(sw)
-        # Start level
-        sampled_levels.append(levels[0])
-        # Next levels from switches
-        for _ in unique_switches:
-            idx = min(last_idx + 1, len(levels) - 1)
-            sampled_levels.append(levels[idx])
-            last_idx = idx
-        # Pad/trim to desired_levels
-        while len(sampled_levels) < desired_levels:
-            sampled_levels.append(sampled_levels[-1])
-        sampled_levels = sampled_levels[:desired_levels]
-        # Ratios must be length desired_levels-1
-        while len(unique_switches) < desired_levels - 1:
-            unique_switches.append(unique_switches[-1] + 0.1 if unique_switches else 0.2)
-        unique_switches = unique_switches[:desired_levels - 1]
-        return [np.clip(l, 0.0, 1.0) for l in sampled_levels], sorted(unique_switches)
-
-    upper_throttle_levels, upper_throttle_ratios = throttle_to_levels_and_ratios(CFG.upper_stage_throttle_program)
-    booster_throttle_levels, booster_throttle_ratios = throttle_to_levels_and_ratios(CFG.booster_throttle_program)
-
-    return np.array([
-        CFG.meco_mach,
-        booster_pitch_times[0], booster_pitch_angles[0],
-        booster_pitch_times[1], booster_pitch_angles[1],
-        booster_pitch_times[2], booster_pitch_angles[2],
-        booster_pitch_times[3], booster_pitch_angles[3],
-        booster_pitch_times[4], booster_pitch_angles[4],
-        30.0,   # coast_s
-        200.0,  # upper_burn_s
-        10.0,   # upper_ignition_delay_s
-        0.0,    # azimuth_deg (east)
-        upper_pitch_times[0], upper_pitch_angles[0],
-        upper_pitch_times[1], upper_pitch_angles[1],
-        upper_pitch_times[2], upper_pitch_angles[2],
-        *upper_throttle_levels,
-        *upper_throttle_ratios,
-        *booster_throttle_levels,
-        *booster_throttle_ratios,
-    ], dtype=float)
 
 
 from dataclasses import dataclass
@@ -188,6 +161,8 @@ class OptimizationParams:
 
 def log_iteration(phase: str, iteration: int, params: OptimizationParams, results: dict):
     """Helper to log a single optimizer iteration with de-scaled physics values."""
+    if not isinstance(params, OptimizationParams):
+        params = OptimizationParams(*params)
     with open(LOG_FILENAME, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -242,12 +217,26 @@ def ensure_log_header():
             ])
 
 
-def run_simulation_wrapper(params: OptimizationParams):
+import copy
+
+def run_simulation_wrapper(params: OptimizationParams, env_config: EnvironmentConfig, hw_config: HardwareConfig, sw_config: SoftwareConfig, sim_config: SimulationConfig, log_config: LoggingConfig):
     """
     Runs the simulation with a structured parameter object.
     This function de-scales parameters into real physics units for the simulation
     and returns a dictionary with detailed results.
     """
+    if not isinstance(params, OptimizationParams):
+        params = OptimizationParams(*params)
+    
+    # Create a deep copy of configs to avoid modifying the originals
+    # These configs will be passed to main_orchestrator as the base
+    # and then modified by the optimization parameters
+    cfg_env = copy.deepcopy(env_config)
+    cfg_hw = copy.deepcopy(hw_config)
+    cfg_sw = copy.deepcopy(sw_config)
+    cfg_sim = copy.deepcopy(sim_config)
+    cfg_log = copy.deepcopy(log_config)
+
     # 1. DE-SCALE AND PREPARE PARAMETERS for physics simulation
     # Pitch angles are treated consistently with the config: 0 = horizontal, 90 = vertical.
     pitch_angles = np.clip([
@@ -285,11 +274,11 @@ def run_simulation_wrapper(params: OptimizationParams):
     booster_throttle_switch_ratios = np.clip([params.booster_throttle_switch_ratio_0, params.booster_throttle_switch_ratio_1, params.booster_throttle_switch_ratio_2], 0.0, 1.0)
     booster_throttle_switch_ratios.sort()  # Ensure ratios are increasing
 
-    # 2. UPDATE CONFIGURATION
-    CFG.meco_mach = float(params.meco_mach)
-    CFG.pitch_guidance_mode = 'parameterized' 
-    CFG.separation_delay_s = float(params.coast_s)
-    CFG.upper_ignition_delay_s = float(params.upper_ignition_delay_s)
+    # 2. UPDATE CONFIGURATION (on the copy)
+    cfg_hw.meco_mach = float(params.meco_mach)
+    cfg_sw.pitch_guidance_mode = 'parameterized' 
+    cfg_hw.separation_delay_s = float(params.coast_s)
+    cfg_hw.upper_ignition_delay_s = float(params.upper_ignition_delay_s)
 
     # Construct upper stage throttle program
     upper_throttle_program = []
@@ -309,12 +298,13 @@ def run_simulation_wrapper(params: OptimizationParams):
             
     upper_throttle_program.append([params.upper_burn_s, upper_throttle_levels[-1]])
     upper_throttle_program.append([params.upper_burn_s + 1, 0.0])
-    CFG.upper_stage_throttle_program = upper_throttle_program
+    cfg_sw.upper_stage_throttle_program = upper_throttle_program
 
     # Construct booster throttle program
     booster_throttle_program = []
-    mdot_approx = CFG.booster_thrust_sl / (CFG.booster_isp_sl * CFG.G0)
-    booster_burn_duration_proxy = CFG.booster_prop_mass / mdot_approx if mdot_approx > 0 else 160.0
+    # Note: sim_config.G0 has been moved to env_config.G0
+    mdot_approx = cfg_hw.booster_thrust_sl / (cfg_hw.booster_isp_sl * cfg_env.G0) 
+    booster_burn_duration_proxy = cfg_hw.booster_prop_mass / mdot_approx if mdot_approx > 0 else 160.0
     
     current_booster_time_ratio = 0.0
     booster_throttle_program.append([current_booster_time_ratio * booster_burn_duration_proxy, booster_throttle_levels[0]])
@@ -332,18 +322,24 @@ def run_simulation_wrapper(params: OptimizationParams):
             
     booster_throttle_program.append([booster_burn_duration_proxy, booster_throttle_levels[-1]])
     booster_throttle_program.append([booster_burn_duration_proxy + 1, 0.0])
-    CFG.booster_throttle_program = booster_throttle_program
+    cfg_sw.booster_throttle_program = booster_throttle_program
     
-    CFG.orbit_alt_tol = 1e6
-    CFG.exit_on_orbit = False
+    cfg_sim.orbit_alt_tol = 1e6
+    cfg_sim.exit_on_orbit = False
     
     results = {"fuel": 0.0, "error": PENALTY_CRASH, "status": "INIT", "cost": PENALTY_CRASH}
     
     try:
-        sim, state0, t0 = build_simulation()
+        sim, state0, t0, _log_config, _analysis_config = main_orchestrator(
+            env_config=cfg_env,
+            hw_config=cfg_hw,
+            sw_config=cfg_sw,
+            sim_config=cfg_sim,
+            log_config=cfg_log,
+        )
 
-        sim.guidance.throttle_schedule = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
-        sim.rocket.booster_throttle_program = ParameterizedThrottleProgram(schedule=CFG.booster_throttle_program, apply_to_stage0=True)
+        sim.guidance.throttle_schedule = ParameterizedThrottleProgram(schedule=cfg_sw.upper_stage_throttle_program)
+        sim.rocket.booster_throttle_program = ParameterizedThrottleProgram(schedule=cfg_sw.booster_throttle_program)
         
         booster_pitch_points = list(zip(pitch_times, pitch_angles_deg))
         upper_pitch_points = list(zip(upper_pitch_times, upper_pitch_angles_deg))
@@ -362,29 +358,29 @@ def run_simulation_wrapper(params: OptimizationParams):
         
         initial_mass = state0.m
 
-        coarse_log = sim.run(t0, duration=2000.0, dt=2.0, state0=state0, orbit_target_radius=R_EARTH + TARGET_ALT_M, exit_on_orbit=False)
+        coarse_log = sim.run(t0, duration=2000.0, dt=2.0, state0=state0)
         max_altitude_coarse = max(coarse_log.altitude) if coarse_log.altitude else 0.0
         if max_altitude_coarse < 50_000.0:
             results["status"] = "CRASH"
             results["error"] = 1e7 + (TARGET_ALT_M - max_altitude_coarse)
             return results
 
-        log = sim.run(t0, duration=3000.0, dt=1.0, state0=state0, orbit_target_radius=R_EARTH + TARGET_ALT_M, exit_on_orbit=False)
+        log = sim.run(t0, duration=3000.0, dt=1.0, state0=state0)
         results["fuel"] = initial_mass - log.m[-1]
         max_altitude = max(log.altitude) if log.altitude else 0.0
 
         r, v = log.r[-1], log.v[-1]
-        a, rp, ra = orbital_elements_from_state(r, v, MU_EARTH)
+        a, rp, ra = orbital_elements_from_state(r, v, env_config.earth_mu)
 
-        if rp is None or ra is None or rp < (R_EARTH - 5000):
+        if rp is None or ra is None or rp < (env_config.earth_radius_m - 5000):
             results["status"] = "CRASH"
             results["error"] = 1e7 + (TARGET_ALT_M - max_altitude)
             return results
 
-        target_r = R_EARTH + TARGET_ALT_M
+        target_r = env_config.earth_radius_m + TARGET_ALT_M
         results["error"] = abs(rp - target_r) + abs(ra - target_r)
 
-        perigee_alt = rp - R_EARTH
+        perigee_alt = rp - env_config.earth_radius_m
         ecc = abs((ra - rp) / (ra + rp)) if (ra + rp) != 0 else 0
         results["perigee_alt_m"] = perigee_alt
         results["eccentricity"] = ecc
@@ -406,6 +402,7 @@ def run_simulation_wrapper(params: OptimizationParams):
         results["status"] = "SIM_FAIL_INDEX"
     except Exception:
         results["status"] = "SIM_FAIL_UNKNOWN"
+        print(f"Simulation wrapper encountered an unexpected error: {traceback.format_exc()}", flush=True) # Added more detailed error logging
     finally:
         results["orbit_error"] = results.get("error", PENALTY_CRASH)
 
@@ -424,52 +421,10 @@ def soft_bounds_penalty(scaled_params, bounds):
 # ...
 
 
-def objective_phase1(scaled_params: np.ndarray):
-    """Objective function for Phase 1: Minimize orbital error."""
-    global global_iter_count
-    global_iter_count.value += 1
-    
-    params_obj = OptimizationParams(*scaled_params)
-    results = run_simulation_wrapper(params_obj)
-    
-    results['cost'] = results['error']
-    bound_penalty = soft_bounds_penalty(scaled_params, bounds)
-    results['cost'] += bound_penalty
-
-    log_iteration("Phase 1", global_iter_count.value, params_obj, results)
-    print(
-        f"[Phase 1] Iter {global_iter_count.value:3d} | Error: {results['error']/1000:.1f} km | Status: {results['status']}", flush=True)
-
-    return results['cost']
 
 
-def objective_phase2(scaled_params: np.ndarray):
-    """Objective function for Phase 2: Minimize fuel usage."""
-    global global_iter_count
-    global_iter_count.value += 1
 
-    params_obj = OptimizationParams(*scaled_params)
-    results = run_simulation_wrapper(params_obj)
-    fuel, error = results["fuel"], results["error"]
-
-    # Penalize heavily if we stray too far from the target orbit
-    if error > TARGET_TOLERANCE_M:
-        penalty = (error - TARGET_TOLERANCE_M) * 10.0  # Heavy penalty
-        cost = fuel + penalty
-    else:
-        cost = fuel
-        
-    bound_penalty = soft_bounds_penalty(scaled_params, bounds)
-    cost += bound_penalty
-    results['cost'] = cost
-
-    log_iteration("Phase 2", global_iter_count.value, params_obj, results)
-    print(f"[Phase 2] Iter {global_iter_count.value:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", flush=True)
-
-    return cost
-
-
-def run_cma_phase(objective_fn, bounds, start=None, sigma_scale=0.2, maxiter=200, popsize=None):
+def run_cma_phase(objective_fn_wrapper, bounds, start=None, sigma_scale=0.2, maxiter=200, popsize=None):
     """
     Run a CMA-ES loop for a given objective and bounds. Returns the cma result object.
     """
@@ -498,7 +453,7 @@ def run_cma_phase(objective_fn, bounds, start=None, sigma_scale=0.2, maxiter=200
     with multiprocessing.Pool() as pool:
         while not es.stop():
             candidates = es.ask()
-            work = [(objective_fn, cand, bounds) for cand in candidates]
+            work = [(objective_fn_wrapper, cand, bounds) for cand in candidates]
             costs = pool.map(_evaluate_candidate, work)
             gen_best = float(np.min(costs)) if costs else np.inf
             print(f"[CMA] gen {es.countiter:3d} | best this gen: {gen_best:.2f}", flush=True)
@@ -508,7 +463,18 @@ def run_cma_phase(objective_fn, bounds, start=None, sigma_scale=0.2, maxiter=200
 
 def run_optimization():
     """Runs the two-phase optimization process."""
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sw_config = SoftwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    analysis_config = AnalysisConfig()
+
     global global_iter_count
+    
+    # Use config values for optimization constants
+    global TARGET_ALT_M
+    TARGET_ALT_M = sim_config.target_orbit_alt_m
 
     # --- Initial Guess & Bounds (SCALED) ---
     # Use km for altitudes to keep numbers in a similar magnitude
@@ -569,11 +535,13 @@ def run_optimization():
         return tightened
 
     # Build start params either from manual seed or config-derived defaults.
-    if CFG.optimizer_manual_seed and len(CFG.optimizer_manual_seed) == 35:
-        start_params = np.array(CFG.optimizer_manual_seed, dtype=float)
+    if analysis_config.optimizer_manual_seed and len(analysis_config.optimizer_manual_seed) == 35:
+        start_params = np.array(analysis_config.optimizer_manual_seed, dtype=float)
         bounds = tighten_bounds(bounds, start_params, margin=0.2)
     else:
-        start_params = build_default_params_from_config()
+        start_params = (
+            np.array([b[0] for b in bounds], dtype=float) + np.array([b[1] for b in bounds], dtype=float)
+        ) / 2.0
 
     ensure_log_header()
     print(f"=== PHASE 1: TARGETING ORBIT (Logging to {LOG_FILENAME}) ===", flush=True)
@@ -582,6 +550,18 @@ def run_optimization():
     lb = np.array([b[0] for b in bounds], dtype=float)
     ub = np.array([b[1] for b in bounds], dtype=float)
     start_params = np.clip(start_params, lb, ub)
+    
+    objective_phase1 = ObjectiveFunctionWrapper(
+        phase=1,
+        env_config=env_config,
+        hw_config=hw_config,
+        sw_config=sw_config,
+        sim_config=sim_config,
+        log_config=log_config,
+        analysis_config=analysis_config,
+        bounds=bounds
+    )
+
     if CMA_AVAILABLE:
         print("Using CMA-ES for Phase 1", flush=True)
         res1 = run_cma_phase(objective_phase1, bounds, start=start_params, sigma_scale=0.15, maxiter=120, popsize=14)
@@ -609,6 +589,17 @@ def run_optimization():
     print("\n=== PHASE 2: MINIMIZING FUEL (CMA-ES if available) ===", flush=True)
     global_iter_count.value = 0  # Reset for phase 2 logging
 
+    objective_phase2 = ObjectiveFunctionWrapper(
+        phase=2,
+        env_config=env_config,
+        hw_config=hw_config,
+        sw_config=sw_config,
+        sim_config=sim_config,
+        log_config=log_config,
+        analysis_config=analysis_config,
+        bounds=bounds
+    )
+
     if CMA_AVAILABLE:
         # Seed phase 2 from phase 1 best with a smaller sigma to focus search.
         res2 = run_cma_phase(
@@ -634,7 +625,14 @@ def run_optimization():
     print("\n=== OPTIMIZATION COMPLETE ===", flush=True)
     final_params2 = best2
     # Run one last time for final numbers
-    final_results = run_simulation_wrapper(final_params2)
+    final_results = run_simulation_wrapper(
+        final_params2,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config
+    )
 
     print(f"Final Fuel Used: {final_results['fuel']:.1f} kg", flush=True)
     print(f"Final Orbit Error: {final_results['error']/1000:.1f} km", flush=True)

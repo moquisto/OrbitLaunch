@@ -2,9 +2,9 @@ import numpy as np
 import types
 import pytest
 
-import atmosphere
-from atmosphere import AtmosphereModel, AtmosphereProperties
-from gravity import EarthModel, orbital_elements_from_state, J2_EARTH
+from Environment.atmosphere import AtmosphereModel, AtmosphereProperties
+from Environment.gravity import EarthModel, orbital_elements_from_state
+from Environment.config import EnvironmentConfig
 
 
 def test_atmosphere_dispatch(monkeypatch):
@@ -19,9 +19,10 @@ def test_atmosphere_dispatch(monkeypatch):
         return AtmosphereProperties(rho=4.0, p=5.0, T=6.0)
 
     monkeypatch.setattr(AtmosphereModel, "_us76_properties", fake_us76, raising=False)
-    monkeypatch.setattr(AtmosphereModel, "_nrlmsis_properties", fake_msis, raising=False)
-
-    model = AtmosphereModel(h_switch=100.0)
+        monkeypatch.setattr(AtmosphereModel, "_nrlmsis_properties", fake_msis, raising=False)
+        config = EnvironmentConfig()
+    config.atmosphere_switch_alt_m = 100.0
+    model = AtmosphereModel(config)
 
     low = model.properties(50.0, t=0.0)
     high = model.properties(150.0, t=0.0)
@@ -32,6 +33,7 @@ def test_atmosphere_dispatch(monkeypatch):
 
 
 def test_earth_gravity_central_and_j2():
+    config = EnvironmentConfig()
     mu = 1.0
     R = 1.0
     earth_central = EarthModel(mu=mu, radius=R, omega_vec=np.zeros(3), j2=None)
@@ -39,7 +41,7 @@ def test_earth_gravity_central_and_j2():
     a = earth_central.gravity_accel(r_vec)
     np.testing.assert_allclose(a, np.array([-1.0, 0.0, 0.0]), atol=1e-9)
 
-    earth_j2 = EarthModel(mu=mu, radius=R, omega_vec=np.zeros(3), j2=J2_EARTH)
+    earth_j2 = EarthModel(mu=mu, radius=R, omega_vec=np.zeros(3), j2=config.j2_coeff)
     a_j2 = earth_j2.gravity_accel(np.array([1.0, 0.0, 0.0]))
     # x-component should be less negative due to J2 term
     assert a_j2[0] > a[0]

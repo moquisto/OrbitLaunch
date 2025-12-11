@@ -1,8 +1,13 @@
 import numpy as np
 import pytest
 
-from simulation import Simulation, ControlCommand
-from config import CFG
+from Main.simulation import Simulation, ControlCommand
+from Environment.config import EnvironmentConfig
+from Hardware.config import HardwareConfig
+from Software.config import SoftwareConfig
+from Main.config import SimulationConfig
+from Logging.config import LoggingConfig
+from Environment.atmosphere import AtmosphereModel
 
 
 class DummyProps:
@@ -13,17 +18,25 @@ class DummyProps:
 
 
 class DummyAtmosphere:
-    def __init__(self, props):
+    def __init__(self, props, env_config=None):
         self.props = props
+        self.env_config = env_config or EnvironmentConfig()
 
     def properties(self, alt, t_env):
         return self.props
+    
+    def get_speed_of_sound(self, alt, t_env):
+        gamma = self.env_config.air_gamma
+        R_air = self.env_config.air_gas_constant
+        return np.sqrt(max(gamma * R_air * self.props.T, 0.0))
 
 
 class DummyEarth:
-    def __init__(self, radius=1000.0, mu=1.0):
+    def __init__(self, radius=1000.0, mu=1.0, omega_vec=np.zeros(3), j2=None):
         self.radius = radius
         self.mu = mu
+        self.omega_vec = omega_vec
+        self.j2 = j2
 
     def gravity_accel(self, r):
         return np.zeros(3)
@@ -32,55 +45,98 @@ class DummyEarth:
         return np.zeros(3)
 
 
-class DummyAero:
-    def drag_force(self, state, earth, t_env, rocket):
-        return np.zeros(3)
-
-
-class DummyRocket:
-    def __init__(self):
-        self.last_throttle = None
-
-    def thrust_and_mass_flow(self, control, state, p_amb):
-        self.last_throttle = control["throttle"]
-        # Force points along thrust direction; magnitude equals throttle for easy checking
-        thrust_vec = control["throttle"] * np.asarray(control["thrust_dir_eci"], dtype=float)
-        return thrust_vec, 0.0
-
-
 def test_rhs_scales_thrust_by_max_accel(monkeypatch):
-    monkeypatch.setattr(CFG, "use_jet_stream_model", False)
-    props = DummyProps(rho=0.0, T=300.0, p=0.0)
-    atmosphere = DummyAtmosphere(props)
-    earth = DummyEarth(radius=1000.0, mu=0.0)
-    aero = DummyAero()
-    rocket = DummyRocket()
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    sw_config = SoftwareConfig()
 
-    sim = Simulation(earth, atmosphere, aero, rocket, max_accel_limit=1.0)
-    state = type("S", (), {})()
+    env_config.use_jet_stream_model = False # Disable wind for this test
+    sim_config.max_accel_limit = 1.0
+
+    props = DummyProps(rho=0.0, T=300.0, p=0.0)
+    atmosphere = DummyAtmosphere(props, env_config)
+    earth = DummyEarth(radius=1000.0, mu=0.0, omega_vec=env_config.earth_omega_vec)
+
+    # Mock Aerodynamics
+    mock_aero = types.SimpleNamespace()
+    mock_aero.drag_force = lambda state, earth, t_env, rocket: np.zeros(3)
+    # Ensure it has the get_wind_at_altitude method if use_jet_stream_model is True
+    # For this test, use_jet_stream_model is False, so no need to mock get_wind_at_altitude
+    mock_aero.env_config = env_config
+
+    # Mock Rocket
+    mock_rocket = types.SimpleNamespace()
+    mock_rocket.thrust_and_mass_flow = lambda control, state, p_amb: (np.array([10.0, 0.0, 0.0]), 0.0)
+    mock_rocket.env_config = env_config # Needs G0
+    mock_rocket.hw_config = hw_config # Needs engine config for mass flow approx, but not used here
+
+    sim = Simulation(
+        earth=earth,
+        atmosphere=atmosphere,
+        aerodynamics=mock_aero,
+        rocket=mock_rocket,
+        sim_config=sim_config,
+        env_config=env_config,
+        log_config=log_config,
+    )
+
+    state = types.SimpleNamespace()
     state.r_eci = np.array([earth.radius + 1.0, 0.0, 0.0])
     state.v_eci = np.array([0.0, 0.0, 0.0])
     state.m = 1.0
     state.stage_index = 0
 
-    control = ControlCommand(throttle=1.0, thrust_direction=np.array([10.0, 0.0, 0.0]))
+    control = ControlCommand(throttle=1.0, thrust_direction=np.array([1.0, 0.0, 0.0])) # Unit vector for thrust direction
 
     _, dv_dt, _, _ = sim._rhs(t_env=0.0, t_sim=0.0, state=state, control=control)
     assert np.linalg.norm(dv_dt) <= 1.0 + 1e-6
 
 
 def test_rhs_scales_throttle_by_max_q(monkeypatch):
-    monkeypatch.setattr(CFG, "use_jet_stream_model", False)
-    props = DummyProps(rho=1.0, T=300.0, p=0.0)
-    atmosphere = DummyAtmosphere(props)
-    earth = DummyEarth(radius=1000.0)
-    aero = DummyAero()
-    rocket = DummyRocket()
+    env_config = EnvironmentConfig()
+    hw_config = HardwareConfig()
+    sim_config = SimulationConfig()
+    log_config = LoggingConfig()
+    sw_config = SoftwareConfig()
 
-    sim = Simulation(earth, atmosphere, aero, rocket, max_q_limit=10.0)
-    state = type("S", (), {})()
+    env_config.use_jet_stream_model = False # Disable wind for this test
+    sim_config.max_q_limit = 10.0
+
+    props = DummyProps(rho=1.0, T=300.0, p=0.0)
+    atmosphere = DummyAtmosphere(props, env_config)
+    earth = DummyEarth(radius=1000.0, mu=0.0, omega_vec=env_config.earth_omega_vec)
+
+    # Mock Aerodynamics
+    mock_aero = types.SimpleNamespace()
+    mock_aero.drag_force = lambda state, earth, t_env, rocket: np.zeros(3) # Drag not relevant for this test, but needed
+    mock_aero.env_config = env_config # For use_jet_stream_model
+
+    # Mock Rocket
+    mock_rocket = types.SimpleNamespace()
+    # Intercept the control dict to check throttle
+    mock_rocket.last_throttle = None
+    def mock_thrust_and_mass_flow(control, state, p_amb):
+        mock_rocket.last_throttle = control["throttle"]
+        return np.array([1.0, 0.0, 0.0]), 0.0 # Return some thrust, 0 mass flow
+    mock_rocket.thrust_and_mass_flow = mock_thrust_and_mass_flow
+    mock_rocket.env_config = env_config # Needs G0
+    mock_rocket.hw_config = hw_config # Not directly used in thrust_and_mass_flow mock
+
+    sim = Simulation(
+        earth=earth,
+        atmosphere=atmosphere,
+        aerodynamics=mock_aero,
+        rocket=mock_rocket,
+        sim_config=sim_config,
+        env_config=env_config,
+        log_config=log_config,
+    )
+
+    state = types.SimpleNamespace()
     state.r_eci = np.array([earth.radius + 1.0, 0.0, 0.0])
-    state.v_eci = np.array([100.0, 0.0, 0.0])
+    state.v_eci = np.array([100.0, 0.0, 0.0]) # High speed to create dynamic pressure
     state.m = 1.0
     state.stage_index = 0
 
@@ -88,5 +144,8 @@ def test_rhs_scales_throttle_by_max_q(monkeypatch):
 
     sim._rhs(t_env=0.0, t_sim=0.0, state=state, control=control)
 
-    # q = 0.5 * rho * v^2 = 5000, so throttle scales by 10/5000
-    assert rocket.last_throttle == pytest.approx(10.0 / 5000.0)
+    # Dynamic pressure q = 0.5 * rho * v_rel_mag^2 = 0.5 * 1.0 * 100^2 = 5000.0
+    # max_q_limit = 10.0
+    # Expected throttle = 1.0 * (max_q_limit / q) = 1.0 * (10.0 / 5000.0)
+    assert mock_rocket.last_throttle == pytest.approx(10.0 / 5000.0)
+

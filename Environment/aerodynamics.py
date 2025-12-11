@@ -6,14 +6,13 @@ Implementations are placeholders.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from .atmosphere import AtmosphereModel
+from .config import EnvironmentConfig
 from typing import Callable, Union, Any, Optional
-
 import numpy as np
-from atmosphere import AtmosphereModel
-from config import CFG
 
 
-def get_wind_at_altitude(altitude: float, r_eci: Optional[np.ndarray] = None) -> np.ndarray:
+def get_wind_at_altitude(altitude: float, env_config: EnvironmentConfig, r_eci: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Returns a wind vector based on altitude to model the jet stream.
     The wind profile ramps up to a peak speed in the jet stream layer (8-13 km)
@@ -21,8 +20,8 @@ def get_wind_at_altitude(altitude: float, r_eci: Optional[np.ndarray] = None) ->
     direction is projected into the local tangent plane so it remains “surface-
     following” rather than a fixed inertial vector.
     """
-    alt_points = np.array(CFG.wind_alt_points)
-    speed_points = np.array(CFG.wind_speed_points)
+    alt_points = np.array(env_config.wind_alt_points)
+    speed_points = np.array(env_config.wind_speed_points)
 
     wind_speed = np.interp(altitude, alt_points, speed_points)
 
@@ -44,7 +43,7 @@ def get_wind_at_altitude(altitude: float, r_eci: Optional[np.ndarray] = None) ->
             else:
                 north = np.array([0.0, 1.0, 0.0], dtype=float)
 
-            dir_local = np.asarray(CFG.wind_direction_vec, dtype=float)
+            dir_local = np.asarray(env_config.wind_direction_vec, dtype=float)
             dir_surface = dir_local[0] * east + dir_local[1] * north + dir_local[2] * up
             norm = np.linalg.norm(dir_surface)
             if norm > 0:
@@ -54,7 +53,7 @@ def get_wind_at_altitude(altitude: float, r_eci: Optional[np.ndarray] = None) ->
         else:
             direction = np.zeros(3)
     else:
-        direction = np.asarray(CFG.wind_direction_vec, dtype=float)
+        direction = np.asarray(env_config.wind_direction_vec, dtype=float)
         norm = np.linalg.norm(direction)
         if norm > 0:
             direction = direction / norm
@@ -64,13 +63,13 @@ def get_wind_at_altitude(altitude: float, r_eci: Optional[np.ndarray] = None) ->
     return direction * wind_speed
 
 
-def mach_dependent_cd(mach: float) -> float:
+def mach_dependent_cd(mach: float, env_config: EnvironmentConfig) -> float:
     """
     A representative drag coefficient (Cd) curve for a generic launch vehicle,
     based on the Mach number. This captures the characteristic transonic drag
     rise and subsequent decrease in the supersonic regime.
     """
-    mach_cd_map = np.array(CFG.mach_cd_map)
+    mach_cd_map = np.array(env_config.mach_cd_map)
     mach_points = mach_cd_map[:, 0]
     cd_points = mach_cd_map[:, 1]
     return np.interp(mach, mach_points, cd_points)
@@ -82,17 +81,18 @@ class CdModel:
     returning Cd as a function of Mach number.
     """
 
-    def __init__(self, value_or_callable: Union[float, Callable[[float], float]] = 2.0):
+    def __init__(self, value_or_callable: Union[float, Callable[[float, EnvironmentConfig], float]], env_config: EnvironmentConfig):
         self.value_or_callable = value_or_callable
+        self.env_config = env_config
 
     def cd(self, mach: float) -> float:
         """Return drag coefficient for a given Mach number.
 
         If value_or_callable is a constant, that value is returned.
-        If it is a callable, it is evaluated as Cd(Mach).
+        If it is a callable, it is evaluated as Cd(Mach, env_config).
         """
         if callable(self.value_or_callable):
-            return float(self.value_or_callable(mach))
+            return float(self.value_or_callable(mach, self.env_config))
         return float(self.value_or_callable)
 
 
@@ -100,7 +100,10 @@ class CdModel:
 class Aerodynamics:
     atmosphere: AtmosphereModel
     cd_model: CdModel
+    env_config: EnvironmentConfig
     reference_area: Optional[float] = None  # fallback if rocket is not provided
+
+
 
     def drag_force(self, state: Any, earth: Any, t: float, rocket: Any = None) -> np.ndarray:
         """Compute aerodynamic drag force in the ECI frame.
@@ -141,8 +144,8 @@ class Aerodynamics:
         # Air-relative velocity: rocket velocity minus (co-rotating atmosphere + wind).
         v_atm_rotation = np.asarray(earth.atmosphere_velocity(r), dtype=float)
         
-        if CFG.use_jet_stream_model:
-            wind_vector = get_wind_at_altitude(altitude, r)
+        if self.env_config.use_jet_stream_model:
+            wind_vector = get_wind_at_altitude(altitude, self.env_config, r)
         else:
             wind_vector = np.array([0.0, 0.0, 0.0])
 
@@ -153,8 +156,8 @@ class Aerodynamics:
             return np.zeros(3)
 
         # Speed of sound (ideal gas, dry air) and Mach number.
-        gamma = CFG.air_gamma
-        R_air = CFG.air_gas_constant
+        gamma = self.config.air_gamma
+        R_air = self.config.air_gas_constant
         a = np.sqrt(max(gamma * R_air * T, 0.0))
         mach = v_rel_mag / a if a > 0.0 else 0.0
 
@@ -188,11 +191,14 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import numpy as np
 
-    from gravity import EarthModel, MU_EARTH, R_EARTH, OMEGA_EARTH
+    from .gravity import EarthModel
+    from .config import EnvironmentConfig
+
+    config = EnvironmentConfig()
 
     # --- Plot 1: Representative Cd vs Mach curve ---
     mach_range = np.linspace(0, 10.0, 200)
-    cd_values = [mach_dependent_cd(m) for m in mach_range]
+    cd_values = [mach_dependent_cd(m, config) for m in mach_range]
     
     fig_cd, ax_cd = plt.subplots(figsize=(8, 5))
     ax_cd.plot(mach_range, cd_values)
@@ -211,11 +217,11 @@ if __name__ == "__main__":
     print("Saved Cd vs. Mach curve plot to cd_curve.png")
 
     # --- Plot 2: Drag force simulation plots ---
-    earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
-    atm = AtmosphereModel()
+    earth = EarthModel(mu=config.earth_mu, radius=config.earth_radius_m, omega_vec=np.array(config.earth_omega_vec))
+    atm = AtmosphereModel(config)
 
     # Simple Cd model for the old test cases
-    cd_model_const = CdModel(2.0)
+    cd_model_const = CdModel(2.0, config)
 
     # Projectile: smaller, more streamlined body.
     diameter_proj = 0.5  # m
@@ -227,8 +233,8 @@ if __name__ == "__main__":
     radius_roc = diameter_roc / 2.0
     A_roc = float(np.pi * radius_roc**2)
 
-    aero_projectile = Aerodynamics(atmosphere=atm, cd_model=cd_model_const, reference_area=A_proj)
-    aero_rocket = Aerodynamics(atmosphere=atm, cd_model=cd_model_const, reference_area=A_roc)
+    aero_projectile = Aerodynamics(atmosphere=atm, cd_model=cd_model_const, config=config, reference_area=A_proj)
+    aero_rocket = Aerodynamics(atmosphere=atm, cd_model=cd_model_const, config=config, reference_area=A_roc)
 
     class State:
         """Minimal state container with r_eci and v_eci attributes."""
@@ -244,7 +250,7 @@ if __name__ == "__main__":
                           aero: Aerodynamics):
         # ... (rest of the function is unchanged)
         # Initial position at surface, along +x.
-        r = np.array([R_EARTH, 0.0, 0.0], dtype=float)
+        r = np.array([config.earth_radius_m, 0.0, 0.0], dtype=float)
         r_norm = np.linalg.norm(r)
         r_hat = r / r_norm
         v_atm0 = earth.atmosphere_velocity(r)

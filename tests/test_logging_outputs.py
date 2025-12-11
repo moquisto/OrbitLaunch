@@ -8,13 +8,7 @@ import importlib
 import main
 import pytest
 
-# Ensure main exposes constants expected by optimizer modules (they may not be re-exported).
-if not hasattr(main, "MU_EARTH"):
-    from gravity import MU_EARTH as _MU
-    main.MU_EARTH = _MU
-if not hasattr(main, "R_EARTH"):
-    from gravity import R_EARTH as _RE
-    main.R_EARTH = _RE
+
 
 otw = importlib.import_module("optimization_twostage")
 
