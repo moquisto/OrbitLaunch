@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import Mock
 
 from rocket import Engine, Stage, Rocket
+from main import ParameterizedThrottleProgram, build_rocket
 from integrators import State
 from config import CFG
 
@@ -210,7 +211,7 @@ def test_rocket_booster_fuel_depletion_ramp_down(default_rocket, mock_state):
     default_rocket._last_time = t1 # Update _last_time for this step, so dt_internal in second call is dt1
 
     control["t"] = t2
-            thrust_vec2, dm_dt2 = default_rocket.thrust_and_mass_flow(control, mock_state, CFG.P_SL)
+    thrust_vec2, dm_dt2 = default_rocket.thrust_and_mass_flow(control, mock_state, CFG.P_SL)
     # After step 2, fuel should be depleted, thrust should be zero
     assert default_rocket.stage_prop_remaining[0] <= 0.0
     assert default_rocket.stage_fuel_empty_time[0] == pytest.approx(t2)
@@ -280,6 +281,37 @@ def test_rocket_booster_throttle_program_interaction(default_rocket, mock_state)
     thrust_vec, dm_dt = default_rocket.thrust_and_mass_flow(control, mock_state, CFG.P_SL)
     expected_thrust_mag = default_rocket.stages[0].engine.thrust_sl * 1.0
     assert np.linalg.norm(thrust_vec) == pytest.approx(expected_thrust_mag, rel=0.01)
+
+
+def test_parameterized_throttle_program_booster_support():
+    """Ensure ParameterizedThrottleProgram can drive the booster when requested."""
+    schedule = [[0.0, 0.4], [10.0, 1.0]]
+    program = ParameterizedThrottleProgram(schedule=schedule, apply_to_stage0=True)
+    state = State(r_eci=np.array([0, 0, CFG.earth_radius_m]), v_eci=np.zeros(3), m=1.0, stage_index=0)
+
+    assert program(0.0, state) == pytest.approx(0.4)
+    assert program(5.0, state) == pytest.approx(0.7)
+    assert program(25.0, state) == pytest.approx(1.0)
+
+
+def test_build_rocket_converts_booster_schedule(monkeypatch):
+    """build_rocket should turn a schedule list into a callable throttle program for the booster."""
+    schedule = [[0.0, 0.5], [5.0, 0.7], [10.0, 1.0]]
+    monkeypatch.setattr(CFG, "booster_throttle_program", schedule)
+    monkeypatch.setattr(CFG, "main_engine_ramp_time", 0.0)
+    monkeypatch.setattr(CFG, "engine_min_throttle", 0.0)
+    monkeypatch.setattr(CFG, "throttle_full_shape_threshold", 1.0)
+
+    rocket = build_rocket()
+    state = State(r_eci=np.array([0, 0, CFG.earth_radius_m]), v_eci=np.zeros(3), m=rocket.stages[0].total_mass(), stage_index=0)
+    control = {"t": 0.0, "throttle": 1.0, "thrust_dir_eci": np.array([0, 0, 1])}
+
+    thrust_vec0, _ = rocket.thrust_and_mass_flow(control, state, CFG.P_SL)
+    assert np.linalg.norm(thrust_vec0) == pytest.approx(rocket.stages[0].engine.thrust_sl * 0.5, rel=0.01)
+
+    control["t"] = 7.5
+    thrust_vec_mid, _ = rocket.thrust_and_mass_flow(control, state, CFG.P_SL)
+    assert np.linalg.norm(thrust_vec_mid) == pytest.approx(rocket.stages[0].engine.thrust_sl * 0.85, rel=0.01)
 
 def test_rocket_min_throttle_enforcement(default_rocket, mock_state):
     """Test min_throttle enforcement."""

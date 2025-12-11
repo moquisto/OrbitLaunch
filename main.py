@@ -83,15 +83,26 @@ class ParameterizedThrottleProgram:
     ignition. The schedule is a list of [time_sec, throttle_level] pairs.
     """
 
-    def __init__(self, schedule: list[list[float]]):
+    def __init__(self, schedule: list[list[float]], apply_to_stage0: bool = False):
         self.schedule = sorted(schedule, key=lambda p: p[0])
         self.time_points = np.array([p[0] for p in self.schedule])
         self.throttle_points = np.array([p[1] for p in self.schedule])
+        # When true, reuse this interpolator for the booster as well (using absolute time).
+        self.apply_to_stage0 = apply_to_stage0
 
     def __call__(self, t: float, state: State) -> float:
         stage_idx = getattr(state, "stage_index", 0)
         if stage_idx == 0:
-            return 1.0  # Booster always full throttle
+            if not self.apply_to_stage0:
+                return 1.0  # Booster always full throttle
+            throttle = np.interp(
+                t,
+                self.time_points,
+                self.throttle_points,
+                left=self.throttle_points[0],
+                right=self.throttle_points[-1],
+            )
+            return float(throttle)
 
         ignition_time = getattr(state, "upper_ignition_start_time", None)
         if ignition_time is None:
@@ -136,6 +147,12 @@ def build_rocket() -> Rocket:
         ref_area=CFG.ref_area_m2,
     )
 
+    booster_program_cfg = CFG.booster_throttle_program
+    if isinstance(booster_program_cfg, (list, tuple, np.ndarray)):
+        booster_program_cfg = ParameterizedThrottleProgram(
+            schedule=booster_program_cfg, apply_to_stage0=True
+        )
+
     return Rocket(
         stages=[booster_stage, upper_stage],
         main_engine_ramp_time=CFG.main_engine_ramp_time,
@@ -149,7 +166,7 @@ def build_rocket() -> Rocket:
         shutdown_ramp_time=CFG.engine_shutdown_ramp_s,
         throttle_shape_full_threshold=CFG.throttle_full_shape_threshold,
         mach_ref_speed=CFG.mach_reference_speed,
-        booster_throttle_program=CFG.booster_throttle_program,
+        booster_throttle_program=booster_program_cfg,
     )
 
 

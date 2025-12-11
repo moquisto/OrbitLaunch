@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from unittest.mock import Mock
 
-from custom_guidance import create_pitch_program_callable
+from custom_guidance import create_pitch_program_callable, simple_pitch_program
 from integrators import State
 
 def test_pitch_program_interpolation():
@@ -170,3 +170,14 @@ def test_pitch_program_pure_vertical_motion_horizontal_fallback():
 
     expected_dir_x = np.sin(np.radians(10)) * vertical_dir_x + np.cos(np.radians(10)) * expected_tangent_dir_x
     np.testing.assert_allclose(thrust_dir_x, expected_dir_x, atol=1e-6)
+
+
+def test_simple_pitch_program_vertical_alignment():
+    """simple_pitch_program should align thrust with the radial direction."""
+    r_vec = np.array([1.0, 2.0, 3.0])
+    mock_state = Mock(spec=State, r_eci=r_vec, v_eci=np.zeros(3))
+    expected = r_vec / np.linalg.norm(r_vec)
+    np.testing.assert_allclose(simple_pitch_program(0.0, mock_state), expected, atol=1e-6)
+
+    zero_state = Mock(spec=State, r_eci=np.zeros(3), v_eci=np.zeros(3))
+    np.testing.assert_allclose(simple_pitch_program(0.0, zero_state), np.array([0.0, 0.0, 1.0]), atol=1e-6)

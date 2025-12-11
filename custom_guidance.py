@@ -93,3 +93,15 @@ def create_pitch_program_callable(pitch_points: List[Tuple[float, float]]) -> Ca
         return thrust_dir_eci
 
     return pitch_program_function
+
+
+def simple_pitch_program(t: float, state: object) -> np.ndarray:
+    """
+    Minimal pitch program used as a safe default for config-based imports.
+    Points thrust along the local vertical.
+    """
+    r_eci = np.asarray(state.r_eci, dtype=float)
+    r_norm = np.linalg.norm(r_eci)
+    if r_norm == 0.0:
+        return np.array([0.0, 0.0, 1.0])
+    return r_eci / r_norm

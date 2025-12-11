@@ -127,8 +127,8 @@ def run_simulation_wrapper(scaled_params):
     # 2. UPDATE CONFIGURATION
     CFG.meco_mach = float(meco_mach)
 
-    # Pitch guidance will be handled by a custom function
-    CFG.pitch_guidance_mode = 'function' 
+    # Keep the factory setup happy, then override with our custom pitch program below.
+    CFG.pitch_guidance_mode = 'parameterized' 
     
     # Second stage parameters
     CFG.separation_delay_s = float(coast_s)
@@ -205,7 +205,7 @@ def run_simulation_wrapper(scaled_params):
         
         # Apply the parameterized throttle program for the booster
         booster_throttle_controller = ParameterizedThrottleProgram(
-            schedule=CFG.booster_throttle_program)
+            schedule=CFG.booster_throttle_program, apply_to_stage0=True)
         sim.rocket.booster_throttle_program = booster_throttle_controller
         
         # Create and apply pitch program

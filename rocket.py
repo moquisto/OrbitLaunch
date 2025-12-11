@@ -252,6 +252,10 @@ class Rocket:
         stage_idx = self.current_stage_index(state)
         stage = self.stages[stage_idx]
 
+        # If the active stage is already empty, mark it and short-circuit thrust.
+        if self.stage_prop_remaining[stage_idx] <= 0.0 and self.stage_fuel_empty_time[stage_idx] is None:
+            self.stage_fuel_empty_time[stage_idx] = t
+
         # Detect MECO event by Mach threshold (booster only) and schedule timeline.
         if (
             stage_idx == 0
@@ -399,5 +403,11 @@ class Rocket:
             ):
                 # Record the first time we detect that this stage's fuel is empty
                 self.stage_fuel_empty_time[stage_idx] = t
+
+        # If fuel is now exhausted, cut thrust immediately for this step.
+        if self.stage_prop_remaining[stage_idx] <= 0.0:
+            thrust_vec = np.zeros_like(thrust_vec)
+            thrust_mag = 0.0
+            dm_dt = 0.0
 
         return thrust_vec, dm_dt
