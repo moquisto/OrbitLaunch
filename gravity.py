@@ -105,7 +105,9 @@ def orbital_elements_from_state(r_vec: np.ndarray, v_vec: np.ndarray, mu: float)
     epsilon = (v_norm**2 / 2.0) - (mu / r_norm)
 
     # Semi-major axis
-    if epsilon == 0:  # Parabolic orbit
+    # Use a tolerance for checking parabolic orbits due to floating point inaccuracies
+    EPSILON_TOL = 1e-9 # A small tolerance, can be adjusted if needed
+    if abs(epsilon) < EPSILON_TOL:  # Parabolic orbit (epsilon is effectively zero)
         a = np.inf
     elif epsilon > 0:  # Hyperbolic orbit
         a = -mu / (2 * epsilon)
@@ -136,7 +138,7 @@ def orbital_elements_from_state(r_vec: np.ndarray, v_vec: np.ndarray, mu: float)
         ra = np.inf # Effectively infinite for hyperbolic
 
     # Handle cases where calculation might result in non-physical or undefined elements
-    if np.isinf(a) or np.isnan(a) or (rp is not None and rp < 0) or (ra is not None and ra < 0):
+    if np.isnan(a) or (rp is not None and rp < 0) or (ra is not None and ra < 0):
         return None, None, None # Indicate non-orbital or invalid state
 
     return a, rp, ra

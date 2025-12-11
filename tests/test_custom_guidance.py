@@ -181,3 +181,51 @@ def test_simple_pitch_program_vertical_alignment():
 
     zero_state = Mock(spec=State, r_eci=np.zeros(3), v_eci=np.zeros(3))
     np.testing.assert_allclose(simple_pitch_program(0.0, zero_state), np.array([0.0, 0.0, 1.0]), atol=1e-6)
+
+def test_pitch_program_with_azimuth_deg():
+    """
+    Test create_pitch_program_callable with a non-zero azimuth_deg.
+    """
+    pitch_points = [(0.0, 45.0)] # 45 degrees from vertical
+    azimuth_deg = 90.0 # East (relative to local North, but defined as angle from East towards North in current implementation)
+                       # Let's assume it's angle from East, counter-clockwise.
+                       # So 90 deg azimuth means purely North direction in horizontal plane.
+                       # The code says "azimuth_deg (deg from east toward north)"
+
+    pitch_program = create_pitch_program_callable(pitch_points, azimuth_deg=azimuth_deg)
+
+    # Rocket on X-axis, representing a launch from equator
+    r_eci = np.array([6.371e6, 0, 0])
+    v_eci = np.array([0, 1000, 0]) # Some velocity to ensure tangent_dir is not purely vertical fallback
+    mock_state = Mock(spec=State, r_eci=r_eci, v_eci=v_eci)
+
+    thrust_dir = pitch_program(0.0, mock_state)
+
+    vertical_dir = r_eci / np.linalg.norm(r_eci) # (1, 0, 0)
+    
+    # Calculate local East and North at r_eci = (R, 0, 0)
+    # up = (1, 0, 0)
+    # east = cross([0,0,1], up) = cross([0,0,1], [1,0,0]) = [0, 1, 0]
+    # north = cross(up, east) = cross([1,0,0], [0,1,0]) = [0, 0, 1]
+    local_east = np.array([0.0, 1.0, 0.0])
+    local_north = np.array([0.0, 0.0, 1.0])
+
+    # For azimuth_deg = 90 (North), tangent_dir should be local_north
+    # dir_local = [0, 1, 0] (for 90 deg azimuth in "deg from east toward north" interpretation)
+    # dir_surface = 0 * local_east + 1 * local_north = local_north
+    expected_tangent_dir = local_north
+    
+    desired_pitch_rad = np.radians(45.0)
+    expected_dir = np.sin(desired_pitch_rad) * vertical_dir + np.cos(desired_pitch_rad) * expected_tangent_dir
+    
+    np.testing.assert_allclose(thrust_dir, expected_dir, atol=1e-6)
+
+    # Test with azimuth_deg = 0 (East)
+    azimuth_deg_east = 0.0
+    pitch_program_east = create_pitch_program_callable(pitch_points, azimuth_deg=azimuth_deg_east)
+    thrust_dir_east = pitch_program_east(0.0, mock_state)
+    
+    expected_tangent_dir_east = local_east
+    expected_dir_east = np.sin(desired_pitch_rad) * vertical_dir + np.cos(desired_pitch_rad) * expected_tangent_dir_east
+    
+    np.testing.assert_allclose(thrust_dir_east, expected_dir_east, atol=1e-6)

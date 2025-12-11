@@ -9,8 +9,8 @@ This version incorporates input scaling and detailed logging for better performa
 """
 import csv
 import numpy as np
-import time
-from scipy.optimize import minimize, differential_evolution
+import copy
+from scipy.optimize import differential_evolution
 from main import build_simulation, ParameterizedThrottleProgram
 from gravity import MU_EARTH, R_EARTH, orbital_elements_from_state
 from config import CFG
@@ -65,7 +65,7 @@ bounds = []
 def build_default_params_from_config():
     """Construct a reasonable starting parameter vector from CFG defaults."""
     # Booster pitch times must respect bounds ordering
-    booster_pitch_times = [0.0, 50.0, 150.0, 250.0, 400.0]
+    booster_pitch_times = [0.0, 40.0, 120.0, 220.0, 300.0]
     booster_pitch_angles = [89.8, 72.0, 55.0, 25.0, 0.0]  # deg, 0=horizontal, 90=vertical
 
     # Upper-stage pitch schedule (relative to upper ignition)
@@ -88,7 +88,7 @@ def build_default_params_from_config():
         30.0,   # coast_s
         200.0,  # upper_burn_s
         10.0,   # upper_ignition_delay_s
-        90.0,   # azimuth_deg (east)
+        0.0,    # azimuth_deg (eastward within bounds)
         upper_pitch_times[0], upper_pitch_angles[0],
         upper_pitch_times[1], upper_pitch_angles[1],
         upper_pitch_times[2], upper_pitch_angles[2],
@@ -145,6 +145,17 @@ def run_simulation_wrapper(scaled_params):
     This function de-scales them into real physics units (meters) for the simulation.
     Returns a dictionary with detailed results.
     """
+    # Snapshot relevant CFG state to restore after run
+    cfg_snapshot = {
+        "meco_mach": CFG.meco_mach,
+        "pitch_guidance_mode": CFG.pitch_guidance_mode,
+        "separation_delay_s": CFG.separation_delay_s,
+        "upper_ignition_delay_s": CFG.upper_ignition_delay_s,
+        "upper_stage_throttle_program": copy.deepcopy(getattr(CFG, "upper_stage_throttle_program", None)),
+        "booster_throttle_program": copy.deepcopy(getattr(CFG, "booster_throttle_program", None)),
+        "orbit_alt_tol": CFG.orbit_alt_tol,
+        "exit_on_orbit": CFG.exit_on_orbit,
+    }
     # 1. DE-SCALE PARAMETERS for physics simulation
     meco_mach, \
     pitch_time_0, pitch_angle_0, \
@@ -347,6 +358,15 @@ def run_simulation_wrapper(scaled_params):
     finally:
         # Ensure both keys exist for downstream logging
         results["orbit_error"] = results.get("orbit_error", results.get("error", PENALTY_CRASH))
+        # Restore CFG
+        CFG.meco_mach = cfg_snapshot["meco_mach"]
+        CFG.pitch_guidance_mode = cfg_snapshot["pitch_guidance_mode"]
+        CFG.separation_delay_s = cfg_snapshot["separation_delay_s"]
+        CFG.upper_ignition_delay_s = cfg_snapshot["upper_ignition_delay_s"]
+        CFG.upper_stage_throttle_program = cfg_snapshot["upper_stage_throttle_program"]
+        CFG.booster_throttle_program = cfg_snapshot["booster_throttle_program"]
+        CFG.orbit_alt_tol = cfg_snapshot["orbit_alt_tol"]
+        CFG.exit_on_orbit = cfg_snapshot["exit_on_orbit"]
 
     return results
 
@@ -365,7 +385,6 @@ def soft_bounds_penalty(scaled_params, bounds):
 
 def objective_phase1(scaled_params):
     global global_iter_count, last_params_phase1, last_cost_phase1, stuck_counter_phase1
-    print(f"DEBUG: Entering objective_phase1, iteration {global_iter_count.value}", flush=True) # Added flush=True here too
 
     global_iter_count.value += 1
 
@@ -376,9 +395,6 @@ def objective_phase1(scaled_params):
     results['cost'] += bound_penalty
 
     log_iteration("Phase 1", global_iter_count.value, scaled_params, results)
-    print(
-        f"[Phase 1] Iter {global_iter_count.value:3d} | Error: {results['error']/1000:.1f} km | Status: {results['status']}", flush=True)
-
     last_cost_phase1 = results['cost']
 
     return results['cost']
@@ -404,8 +420,6 @@ def objective_phase2(scaled_params):
     results['cost'] = cost
 
     log_iteration("Phase 2", global_iter_count.value, scaled_params, results)
-    print(f"[Phase 2] Iter {global_iter_count.value:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", flush=True)
-
     last_cost_phase2 = results['cost']
 
     return results['cost']
@@ -422,6 +436,8 @@ def run_cma_phase(objective_fn, bounds, start=None, sigma_scale=0.2, maxiter=200
     ub = np.array([b[1] for b in bounds], dtype=float)
     if start is None:
         start = (lb + ub) / 2.0
+    else:
+        start = np.clip(start, lb, ub)
     sigma0 = sigma_scale * float(np.mean(ub - lb))
 
     opts = {
@@ -429,7 +445,7 @@ def run_cma_phase(objective_fn, bounds, start=None, sigma_scale=0.2, maxiter=200
         "maxiter": maxiter,
         # Smaller popsize to keep simulation cost reasonable; can be tuned.
         "popsize": popsize or (8 + int(3 * np.log(len(lb)))),
-        "verb_disp": 1,
+        "verb_disp": 0,
     }
     es = cma.CMAEvolutionStrategy(start.tolist(), sigma0, opts)
 
@@ -451,46 +467,46 @@ def run_optimization():
     # params: meco_mach, pitch_start_km, pitch_end_km, pitch_blend, coast_s, upper_burn_s
     global bounds # Make bounds global for soft_bounds_penalty
     bounds = [
-        (2.0, 9.0),      # 0: MECO Mach
+        (4.5, 6.5),      # 0: MECO Mach
         # Pitch profile (5 points, time in seconds, angle in degrees relative to horizontal)
-        (0.0, 50.0),     # 1: pitch_time_0 (s)
-        (70.0, 90.0),    # 2: pitch_angle_0 (deg, 90=vertical)
-        (50.0, 150.0),   # 3: pitch_time_1 (s)
-        (30.0, 80.0),    # 4: pitch_angle_1 (deg)
-        (150.0, 300.0),  # 5: pitch_time_2 (s)
-        (20.0, 60.0),    # 6: pitch_angle_2 (deg)
-        (250.0, 450.0),  # 7: pitch_time_3 (s)
-        (10.0, 40.0),    # 8: pitch_angle_3 (deg)
-        (400.0, 600.0),  # 9: pitch_time_4 (s)
+        (0.0, 30.0),     # 1: pitch_time_0 (s)
+        (80.0, 90.0),    # 2: pitch_angle_0 (deg, 90=vertical)
+        (20.0, 80.0),    # 3: pitch_time_1 (s)
+        (60.0, 85.0),    # 4: pitch_angle_1 (deg)
+        (70.0, 180.0),   # 5: pitch_time_2 (s)
+        (40.0, 70.0),    # 6: pitch_angle_2 (deg)
+        (150.0, 260.0),  # 7: pitch_time_3 (s)
+        (20.0, 50.0),    # 8: pitch_angle_3 (deg)
+        (220.0, 320.0),  # 9: pitch_time_4 (s)
         (0.0, 20.0),     # 10: pitch_angle_4 (deg)
         # Staging and upper stage burn
-        (10.0, 500.0),   # 11: Coast duration after MECO (s)
-        (50.0, 400.0),   # 12: Upper stage burn duration (s)
-        (0.0, 120.0),    # 13: Upper stage ignition delay after separation (s)
-        (-180.0, 180.0), # 14: Azimuth heading (deg from east toward north)
-        # Upper-stage pitch profile (time from upper ignition, deg from vertical)
-        (0.0, 120.0),    # 15: upper_pitch_time_0 (s)
-        (0.0, 45.0),     # 16: upper_pitch_angle_0 (deg)
-        (30.0, 240.0),   # 17: upper_pitch_time_1 (s)
+        (5.0, 200.0),    # 11: Coast duration after MECO (s)
+        (100.0, 300.0),  # 12: Upper stage burn duration (s)
+        (0.0, 60.0),     # 13: Upper stage ignition delay after separation (s)
+        (-15.0, 15.0),   # 14: Azimuth heading (deg from east toward north)
+        # Upper-stage pitch profile (time from upper ignition, deg from horizontal)
+        (0.0, 60.0),     # 15: upper_pitch_time_0 (s)
+        (5.0, 45.0),     # 16: upper_pitch_angle_0 (deg)
+        (40.0, 180.0),   # 17: upper_pitch_time_1 (s)
         (0.0, 30.0),     # 18: upper_pitch_angle_1 (deg)
-        (120.0, 400.0),  # 19: upper_pitch_time_2 (s)
-        (0.0, 20.0),     # 20: upper_pitch_angle_2 (deg)
+        (150.0, 300.0),  # 19: upper_pitch_time_2 (s)
+        (0.0, 15.0),     # 20: upper_pitch_angle_2 (deg)
         # Upper stage throttle profile (4 levels, 3 switch ratios)
-        (0.5, 1.0),      # 21: upper_throttle_level_0 (0-1)
-        (0.5, 1.0),      # 22: upper_throttle_level_1 (0-1)
-        (0.5, 1.0),      # 23: upper_throttle_level_2 (0-1)
-        (0.5, 1.0),      # 24: upper_throttle_level_3 (0-1)
-        (0.1, 0.3),      # 25: upper_throttle_switch_ratio_0 (0-1, fraction of burn duration)
-        (0.3, 0.7),      # 26: upper_throttle_switch_ratio_1 (0-1, fraction of burn duration)
-        (0.7, 0.9),      # 27: upper_throttle_switch_ratio_2 (0-1, fraction of burn duration)
+        (0.3, 1.0),      # 21: upper_throttle_level_0 (0-1)
+        (0.3, 1.0),      # 22: upper_throttle_level_1 (0-1)
+        (0.3, 1.0),      # 23: upper_throttle_level_2 (0-1)
+        (0.3, 1.0),      # 24: upper_throttle_level_3 (0-1)
+        (0.05, 0.4),     # 25: upper_throttle_switch_ratio_0 (0-1, fraction of burn duration)
+        (0.25, 0.8),     # 26: upper_throttle_switch_ratio_1 (0-1, fraction of burn duration)
+        (0.6, 0.95),     # 27: upper_throttle_switch_ratio_2 (0-1, fraction of burn duration)
         # Booster throttle profile (4 levels, 3 switch ratios)
-        (0.5, 1.0),      # 28: booster_throttle_level_0 (0-1)
-        (0.5, 1.0),      # 29: booster_throttle_level_1 (0-1)
-        (0.5, 1.0),      # 30: booster_throttle_level_2 (0-1)
-        (0.5, 1.0),      # 31: booster_throttle_level_3 (0-1)
-        (0.1, 0.3),      # 32: booster_throttle_switch_ratio_0 (0-1, fraction of booster burn duration)
-        (0.3, 0.7),      # 33: booster_throttle_switch_ratio_1 (0-1, fraction of booster burn duration)
-        (0.7, 0.9),      # 34: booster_throttle_switch_ratio_2 (0-1, fraction of booster burn duration)
+        (0.3, 1.0),      # 28: booster_throttle_level_0 (0-1)
+        (0.3, 1.0),      # 29: booster_throttle_level_1 (0-1)
+        (0.3, 1.0),      # 30: booster_throttle_level_2 (0-1)
+        (0.3, 1.0),      # 31: booster_throttle_level_3 (0-1)
+        (0.05, 0.4),     # 32: booster_throttle_switch_ratio_0 (0-1, fraction of booster burn duration)
+        (0.25, 0.8),     # 33: booster_throttle_switch_ratio_1 (0-1, fraction of booster burn duration)
+        (0.6, 0.95),     # 34: booster_throttle_switch_ratio_2 (0-1, fraction of booster burn duration)
     ]
 
     print(f"=== PHASE 1: TARGETING ORBIT (Logging to {LOG_FILENAME}) ===", flush=True)

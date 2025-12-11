@@ -97,7 +97,7 @@ class AtmosphereModel:
         t : float | None
             Simulation time [s]; may be used by the high-altitude model.
         """
-        props = self.properties(altitude, t)
+        props = self.properties(altitude, t=t)
         # Assuming ideal gas: speed_of_sound = sqrt(gamma * R_specific * T)
         # where R_specific = R_universal / M_mean
         gamma = 1.4  # Adiabatic index for air
@@ -155,6 +155,9 @@ class AtmosphereModel:
             # Cast to integer seconds to avoid issues with non-integer timesteps.
             dt = np.timedelta64(int(t), "s")
             date = base_epoch + dt
+
+        # Wrap date in an array to align with expected pymsis.calculate input shape
+        date = np.array([date], dtype="datetime64[ns]")
 
         lon = float(self.lon_deg)
         lat = float(self.lat_deg)

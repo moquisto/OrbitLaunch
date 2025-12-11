@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, mock_open
 
 # Assuming the following imports are needed from the main script
-from optimization_twostage import run_simulation_wrapper, soft_bounds_penalty, objective_phase1, objective_phase2, PENALTY_CRASH, TARGET_TOLERANCE_M, R_EARTH, MU_EARTH, TARGET_ALT_M, Counter
+from optimization_twostage import run_simulation_wrapper, soft_bounds_penalty, objective_phase1, objective_phase2, PENALTY_CRASH, TARGET_TOLERANCE_M, R_EARTH, MU_EARTH, TARGET_ALT_M, Counter, build_default_params_from_config
 from config import CFG # For accessing default config values
 from gravity import orbital_elements_from_state # Import directly for patching
 from main import ParameterizedThrottleProgram
@@ -305,6 +305,7 @@ def mock_globals_for_objectives_and_log():
             with patch('optimization_twostage.global_iter_count', new=mock_counter_instance) as mock_global_iter_count:
                 yield mock_log_iteration, mock_global_iter_count
 
+
 def test_objective_phase1_success(mock_build_simulation_success, mock_globals_for_objectives_and_log):
     """Test objective_phase1 with a successful orbit."""
     mock_build, mock_sim, mock_create_pitch, mock_oe = mock_build_simulation_success
@@ -390,3 +391,92 @@ def test_objective_phase2_suborbital_with_penalty(mock_build_simulation_suborbit
     assert cost == pytest.approx(expected_cost, rel=0.01)
     mock_log_iteration.assert_called_once()
     assert mock_global_iter_count.value == 1
+
+
+def test_build_default_params_from_config():
+    """Test build_default_params_from_config returns a correctly structured array."""
+    # Temporarily set CFG.meco_mach for a predictable test
+    original_meco_mach = CFG.meco_mach
+    CFG.meco_mach = 5.5 # Example value for testing
+
+    params = build_default_params_from_config()
+
+    # Restore original CFG.meco_mach
+    CFG.meco_mach = original_meco_mach
+
+    # Expected number of parameters based on the definition in optimization_twostage.py
+    # 1 (meco_mach) + 5*2 (pitch times/angles) + 4 (coast, upper_burn, upper_ignition_delay, azimuth) + 3*2 (upper_pitch times/angles) + 4 (upper_throttle_levels) + 3 (upper_throttle_ratios) + 4 (booster_throttle_levels) + 3 (booster_throttle_ratios)
+    # = 1 + 10 + 4 + 6 + 4 + 3 + 4 + 3 = 35
+    assert len(params) == 35
+    assert isinstance(params, np.ndarray)
+    assert params[0] == 5.5 # Check meco_mach
+    assert params[1] == 0.0 # First booster pitch time
+    assert params[2] == 89.8 # First booster pitch angle
+    assert params[11] == 30.0 # coast_s
+    assert params[12] == 200.0 # upper_burn_s
+    assert params[13] == 10.0 # upper_ignition_delay_s
+    assert params[14] == 0.0 # azimuth_deg (eastward within bounds)
+    assert params[15] == 0.0 # first upper_pitch_time
+    assert params[16] == 10.0 # first upper_pitch_angle
+    assert params[21] == 0.9 # first upper throttle level
+    assert params[25] == 0.2 # first upper throttle ratio
+    assert params[28] == 1.0 # first booster throttle level
+    assert params[32] == 0.25 # first booster throttle ratio
+
+def test_log_iteration():
+    """Test log_iteration function ensures correct data formatting and CSV writing."""
+    params = [
+        5.5, # meco_mach
+        0.0, 89.8, # pitch_time_0, pitch_angle_0
+        40.0, 72.0, # pitch_time_1, pitch_angle_1
+        120.0, 55.0, # pitch_time_2, pitch_angle_2
+        220.0, 25.0, # pitch_time_3, pitch_angle_3
+        300.0, 0.0, # pitch_time_4, pitch_angle_4
+        30.0,   # coast_s
+        200.0,  # upper_burn_s
+        10.0,   # upper_ignition_delay_s
+        0.0,    # azimuth_deg
+        0.0, 10.0, # upper_pitch_time_0, upper_pitch_angle_0
+        60.0, 0.0, # upper_pitch_time_1, upper_pitch_angle_1
+        180.0, 0.0, # upper_pitch_time_2, upper_pitch_angle_2
+        0.9, 0.9, 0.9, 0.9, # upper_throttle_levels
+        0.2, 0.5, 0.8, # upper_throttle_switch_ratios
+        1.0, 0.65, 0.65, 1.0, # booster_throttle_levels
+        0.25, 0.55, 0.8 # booster_throttle_switch_ratios
+    ]
+    results = {
+        "cost": 12345.67,
+        "fuel": 50000.123,
+        "orbit_error": 1500.789,
+        "status": "GOOD"
+    }
+
+    expected_row = [
+        "Phase 1", 1, "5.5000",
+        "0.0", "89.8", "40.0", "72.0", "120.0", "55.0", "220.0", "25.0", "300.0", "0.0",
+        "30.0", "200.0", "10.0", "0.0",
+        "0.0", "10.0", "60.0", "0.0", "180.0", "0.0",
+        "0.90", "0.90", "0.90", "0.90",
+        "0.20", "0.50", "0.80",
+        "1.00", "0.65", "0.65", "1.00",
+        "0.25", "0.55", "0.80",
+        "12345.67", "50000.12", "1500.79", "GOOD"
+    ]
+
+    with patch('builtins.open', mock_open()) as mocked_file_open:
+        # Manually import optimization_twostage *after* patching builtins.open
+        # This ensures that when optimization_twostage is loaded, its reference to 'open' is the mocked one.
+        # We also need to reload it to ensure the module-level 'open' call is caught.
+        import sys
+        if 'optimization_twostage' in sys.modules:
+            del sys.modules['optimization_twostage']
+        import optimization_twostage
+        
+        with patch.object(optimization_twostage.csv, 'writer') as mock_csv_writer:
+            mock_writer_instance = mock_csv_writer.return_value
+            # Now, call the log_iteration function directly from the module.
+            optimization_twostage.log_iteration("Phase 1", 1, params, results)
+            
+            mocked_file_open.assert_called_once_with("optimization_twostage_log.csv", "a", newline="")
+            mock_writer_instance.writerow.assert_called_once_with(expected_row)
+
