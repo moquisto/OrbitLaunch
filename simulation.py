@@ -119,6 +119,7 @@ class Simulation:
         atmosphere: AtmosphereModel,
         aerodynamics: Aerodynamics,
         rocket: Rocket,
+        cfg_instance: Any, # Added cfg_instance
         integrator: Optional[Integrator] = None,
         guidance: Optional[Guidance] = None,
         max_q_limit: float | None = None,
@@ -130,12 +131,13 @@ class Simulation:
         self.atmosphere = atmosphere
         self.aero = aerodynamics
         self.rocket = rocket
+        self.cfg = cfg_instance # Store cfg_instance
         self.integrator = integrator or RK4()
         self.guidance = guidance or Guidance()
-        self.max_q_limit = max_q_limit
-        self.max_accel_limit = max_accel_limit
-        self.impact_altitude_buffer_m = impact_altitude_buffer_m
-        self.escape_radius_factor = escape_radius_factor
+        self.max_q_limit = max_q_limit if max_q_limit is not None else self.cfg.path_constraints.max_q_limit # Use self.cfg
+        self.max_accel_limit = max_accel_limit if max_accel_limit is not None else self.cfg.path_constraints.max_accel_limit # Use self.cfg
+        self.impact_altitude_buffer_m = impact_altitude_buffer_m if impact_altitude_buffer_m != -100.0 else self.cfg.termination_logic.impact_altitude_buffer_m # Use self.cfg
+        self.escape_radius_factor = escape_radius_factor if escape_radius_factor != 1.05 else self.cfg.termination_logic.escape_radius_factor # Use self.cfg
         # Tiny memo caches (cleared each run)
         self._atmo_cache: dict[tuple[float, float], Any] = {}
         self._wind_cache: dict[float, np.ndarray] = {}
@@ -164,7 +166,7 @@ class Simulation:
         if altitude in self._wind_cache:
             wind_vec = self._wind_cache[altitude]
         else:
-            wind_vec = get_wind_at_altitude(altitude) if CFG.atmosphere.use_jet_stream_model else np.zeros(3)
+            wind_vec = get_wind_at_altitude(altitude, self.cfg) # Pass self.cfg
             self._wind_cache[altitude] = wind_vec
 
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
@@ -180,7 +182,7 @@ class Simulation:
         if self.max_q_limit is not None and q > self.max_q_limit and q > 0.0:
             throttle = float(np.clip(throttle * (self.max_q_limit / q), 0.0, 1.0))
 
-        # Thrust + mass flow (rocket expects t, throttle, thrust_dir_eci)
+        # Thrust + mass flow (rocket expects t, throttle, thrust_dir_eci),
         control_payload = {
             "t": t_sim,
             "throttle": throttle,
@@ -206,8 +208,8 @@ class Simulation:
         dm_dt = float(dm_dt)
 
         # Diagnostics
-        gamma = CFG.physics.air_gamma
-        R_air = CFG.physics.air_gas_constant
+        gamma = self.cfg.physics.air_gamma # Use self.cfg
+        R_air = self.cfg.physics.air_gas_constant # Use self.cfg
         a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0

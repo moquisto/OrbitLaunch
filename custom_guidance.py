@@ -47,7 +47,7 @@ def orbital_elements_from_state(r_vec, v_vec, mu: float) -> Tuple[float | None, 
 
 # --- Example Pitch Program ---
 
-def simple_pitch_program(t: float, state: State) -> np.ndarray:
+def simple_pitch_program(t: float, state: State, cfg_instance) -> np.ndarray:
     """
     Original gravity-turn inspired pitch program.
     Uses start/end altitudes from config.
@@ -63,20 +63,20 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
     east_norm = np.linalg.norm(east)
     east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
 
-    alt = r_norm - CFG.central_body.earth_radius_m
+    alt = r_norm - cfg_instance.central_body.earth_radius_m
     
-    start_alt = CFG.pitch_guidance.pitch_turn_start_m
-    end_alt = CFG.pitch_guidance.pitch_turn_end_m
+    start_alt = cfg_instance.pitch_guidance.pitch_turn_start_m
+    end_alt = cfg_instance.pitch_guidance.pitch_turn_end_m
     
     if alt < start_alt:
-        initial_pitch_rad = np.deg2rad(CFG.pitch_guidance.initial_pitch_deg)
+        initial_pitch_rad = np.deg2rad(cfg_instance.pitch_guidance.initial_pitch_deg)
         # Blend r_hat (vertical) and east (horizontal) based on initial_pitch_deg
         # Cos for horizontal component, Sin for vertical component
         direction = np.sin(initial_pitch_rad) * r_hat + np.cos(initial_pitch_rad) * east
         n = np.linalg.norm(direction)
         return direction / n if n > 0.0 else r_hat
     elif alt < end_alt:
-        w = ((alt - start_alt) / max(end_alt - start_alt, 1.0)) ** CFG.pitch_guidance.pitch_blend_exp
+        w = ((alt - start_alt) / max(end_alt - start_alt, 1.0)) ** cfg_instance.pitch_guidance.pitch_blend_exp
         direction = (1.0 - w) * r_hat + w * east
     else:
         speed = np.linalg.norm(v)

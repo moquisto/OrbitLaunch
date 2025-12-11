@@ -6,15 +6,33 @@ Phase 1: "Targeting" - Find ANY parameters that hit the target orbit (Ignore fue
 Phase 2: "Optimizing" - From that valid orbit, minimize fuel usage while staying in orbit.
 """
 
+import importlib
 import numpy as np
 import time
-import os # Import os for cpu_count
+import os  # Import os for cpu_count
+import copy  # Import copy for deepcopy
 from scipy.optimize import differential_evolution
-from main import build_simulation, orbital_elements_from_state # Removed MU_EARTH, R_EARTH
+from main import ParameterizedThrottleProgram, build_simulation, orbital_elements_from_state
 from config import CFG
 
 # --- Configuration (for optimizer) ---
 TARGET_TOLERANCE = 2000.0 # We need to be within 2km to consider it "Orbit"
+
+
+def _install_throttle(sim, cfg_instance):
+    """Match the throttle controller used in main() so optimization is consistent."""
+    orbit_radius = cfg_instance.central_body.earth_radius_m + cfg_instance.target_orbit.target_orbit_alt_m
+    if cfg_instance.throttle_guidance.throttle_guidance_mode == 'parameterized':
+        controller = ParameterizedThrottleProgram(schedule=cfg_instance.throttle_guidance.upper_stage_throttle_program)
+    elif cfg_instance.throttle_guidance.throttle_guidance_mode == 'function':
+        module_name, class_name = cfg_instance.throttle_guidance.throttle_guidance_function_class.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        ControllerClass = getattr(module, class_name)
+        controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu)
+    else:
+        raise ValueError(f"Unknown throttle_guidance_mode: '{cfg_instance.throttle_guidance.throttle_guidance_mode}'")
+    sim.guidance.throttle_schedule = controller
+    return orbit_radius
 
 def run_simulation_wrapper(params, cfg_instance):
     """Helper to run sim and return (fuel_used, orbit_error_m)"""
@@ -53,11 +71,18 @@ def run_simulation_wrapper(params, cfg_instance):
 
     try:
         sim, state0, t0 = build_simulation(cfg_instance) # Pass cfg_instance
-        log = sim.run(t0, duration=4000.0, dt=cfg_instance.simulation_timing.main_dt_s, state0=state0,
-                      orbit_target_radius=current_r_earth + current_target_alt_m, # Use local vars
-                      exit_on_orbit=cfg_instance.orbit_tolerances.exit_on_orbit)
+        orbit_radius = _install_throttle(sim, cfg_instance)
+        initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
+        log = sim.run(
+            t0,
+            duration=4000.0,
+            dt=cfg_instance.simulation_timing.main_dt_s,
+            state0=state0,
+            orbit_target_radius=current_r_earth + current_target_alt_m, # Use local vars
+            exit_on_orbit=cfg_instance.orbit_tolerances.exit_on_orbit,
+        )
 
-        fuel_used = state0.m - log.m[-1]
+        fuel_used = initial_prop - sum(sim.rocket.stage_prop_remaining)
 
         r, v = log.r[-1], log.v[-1]
         a, rp, ra = orbital_elements_from_state(r, v, current_mu_earth) # Use local vars
@@ -94,14 +119,25 @@ def objective_phase2(params, _cfg_instance): # Accept _cfg_instance
     return cost
 
 def run_optimization():
+    # Check if guidance modes are set correctly for optimization
+    if CFG.pitch_guidance.pitch_guidance_mode != "function":
+        print(f"WARNING: Pitch guidance mode is '{CFG.pitch_guidance.pitch_guidance_mode}'. "
+              "Optimization parameters for pitch guidance will NOT be used unless set to 'function'.")
+    if CFG.throttle_guidance.throttle_guidance_mode != "function":
+        print(f"WARNING: Throttle guidance mode is '{CFG.throttle_guidance.throttle_guidance_mode}'. "
+              "Optimization parameters for upper stage throttle will NOT be used unless set to 'function'.")
+    
     # Initial Guess (No longer used by differential_evolution, but bounds are)
     # x0 = [3.5, 1.5, 85.0, 0.85, 1.05, 2500.0, 1.0, 1.0] 
     bounds = [(2.0, 9.0), (0.5, 10.0), (40.0, 150.0), (0.4, 1.5), (1.01, 1.2), (1000.0, 4000.0), (0.5, 1.0), (0.5, 1.0), (80.0, 90.0), (50.0, 120.0)]
 
     num_workers = os.cpu_count() - 1 if os.cpu_count() is not None and os.cpu_count() > 1 else 1
 
+    # Create a deep copy of CFG to pass to worker processes to avoid multiprocessing global state issues
+    _deep_copied_cfg = copy.deepcopy(CFG)
+
     print("=== PHASE 1: TARGETING ORBIT (using Differential Evolution) ===")
-    res1 = differential_evolution(objective_phase1, bounds, args=(CFG,), maxiter=50, popsize=15, tol=0.01, workers=num_workers) # Using differential_evolution
+    res1 = differential_evolution(objective_phase1, bounds, args=(_deep_copied_cfg,), maxiter=50, popsize=15, tol=0.01, workers=num_workers) # Using differential_evolution
     
     print(f"\nPhase 1 Complete. Best Error: {res1.fun/1000:.1f} km")
     print(f"Params: {res1.x}")
@@ -115,14 +151,10 @@ def run_optimization():
     # Start from the valid orbit we just found (differential_evolution doesn't use x0 directly, but we can pass it if we were using a local optimizer)
     # For differential_evolution, we rely on its population generation, but the result from res1.x is a good indication of a promising region.
     # However, differential_evolution requires bounds to be passed directly.
-    res2 = differential_evolution(objective_phase2, bounds, args=(CFG,), maxiter=100, popsize=15, tol=0.001, workers=num_workers) # Using differential_evolution
-    
+    res2 = differential_evolution(objective_phase2, bounds, args=(_deep_copied_cfg,), maxiter=100, popsize=15, tol=0.001, workers=num_workers) # Using differential_evolution    
     print("\n=== OPTIMIZATION COMPLETE ===")
     print(f"Final Fuel Used: {res2.fun:.1f} kg")
     print(f"Optimal Params: Mach={res2.x[0]:.2f}, Start={res2.x[1]*1000:.0f}m, End={res2.x[2]*1000:.0f}m, Blend={res2.x[3]:.2f}, ApFactor={res2.x[4]:.3f}, Coast={res2.x[5]:.0f}s, CircThr={res2.x[6]:.2f}, FirstThr={res2.x[7]:.2f}, Pitch0={res2.x[8]:.1f}deg, SepAlt={res2.x[9]*1000:.0f}m")
-
-if __name__ == "__main__":
-    run_optimization()
 
 if __name__ == "__main__":
     run_optimization()

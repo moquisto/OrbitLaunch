@@ -8,10 +8,12 @@ Implements Direct Shooting optimization with:
 """
 
 import csv
+import importlib
 import numpy as np
 import time
 from scipy.optimize import minimize
-from main import build_simulation, orbital_elements_from_state, MU_EARTH, R_EARTH
+from gravity import MU_EARTH, R_EARTH
+from main import ParameterizedThrottleProgram, build_simulation, orbital_elements_from_state
 from config import CFG
 
 # --- Configuration ---
@@ -67,8 +69,19 @@ def objective_function(scaled_params):
     status = "INIT"
 
     try:
-        sim, state0, t0 = build_simulation()
-        initial_mass = state0.m
+        sim, state0, t0 = build_simulation(CFG)
+        orbit_radius = CFG.earth_radius_m + TARGET_ALT_M
+        if CFG.throttle_guidance_mode == 'parameterized':
+            controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
+        elif CFG.throttle_guidance_mode == 'function':
+            module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            ControllerClass = getattr(module, class_name)
+            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+        else:
+            raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+        sim.guidance.throttle_schedule = controller
+        initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
         
         # Run sim
         log = sim.run(t0, duration=4000.0, dt=1.0, state0=state0, 
@@ -76,7 +89,7 @@ def objective_function(scaled_params):
                       exit_on_orbit=True)
         
         # 4. CALCULATE RESULT
-        fuel_used = initial_mass - log.m[-1]
+        fuel_used = initial_prop - sum(sim.rocket.stage_prop_remaining)
         
         r_final = log.r[-1]
         v_final = log.v[-1]

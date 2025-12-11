@@ -12,13 +12,15 @@ parameter space:
 4. Pitch Blend Exponent
 """
 
+import importlib
 import numpy as np
 import time
 from scipy.optimize import minimize
 from dataclasses import dataclass
 
 # Import your existing environment
-from main import build_simulation, orbital_elements_from_state, MU_EARTH, R_EARTH
+from gravity import MU_EARTH, R_EARTH
+from main import ParameterizedThrottleProgram, build_simulation, orbital_elements_from_state
 from config import CFG
 
 # --- Optimization Configuration ---
@@ -63,8 +65,19 @@ def objective_function(params):
 
     # 3. Run Simulation (The "Shot")
     try:
-        sim, state0, t0 = build_simulation()
-        initial_mass = state0.m
+        sim, state0, t0 = build_simulation(CFG)
+        orbit_radius = CFG.earth_radius_m + TARGET_ALT_M
+        if CFG.throttle_guidance_mode == 'parameterized':
+            controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
+        elif CFG.throttle_guidance_mode == 'function':
+            module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            ControllerClass = getattr(module, class_name)
+            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+        else:
+            raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+        sim.guidance.throttle_schedule = controller
+        initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
         
         # Run with a generous timeout
         log = sim.run(t0, duration=4000.0, dt=1.0, state0=state0, 
@@ -77,7 +90,7 @@ def objective_function(params):
     # 4. Calculate Costs
     
     # Fuel Cost
-    fuel_used = initial_mass - log.m[-1]
+    fuel_used = initial_prop - sum(sim.rocket.stage_prop_remaining)
     
     # Orbit Error Cost
     # We want a circular orbit at TARGET_ALT_M
@@ -178,11 +191,23 @@ def verify_solution(best_params):
     CFG.orbit_alt_tol = 5000.0 # 5km tolerance
     CFG.exit_on_orbit = True
 
-    sim, state0, t0 = build_simulation()
+    sim, state0, t0 = build_simulation(CFG)
+    orbit_radius = CFG.earth_radius_m + TARGET_ALT_M
+    if CFG.throttle_guidance_mode == 'parameterized':
+        controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
+    elif CFG.throttle_guidance_mode == 'function':
+        module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        ControllerClass = getattr(module, class_name)
+        controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+    else:
+        raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+    sim.guidance.throttle_schedule = controller
+    initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
     log = sim.run(t0, duration=5000, dt=0.5, state0=state0, 
                   orbit_target_radius=R_EARTH + TARGET_ALT_M)
 
-    fuel_used = state0.m - log.m[-1]
+    fuel_used = initial_prop - sum(sim.rocket.stage_prop_remaining)
     r = log.r[-1]
     v = log.v[-1]
     a, rp, ra = orbital_elements_from_state(r, v, MU_EARTH)

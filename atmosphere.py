@@ -5,6 +5,7 @@ combined dispatcher. Implementations are intentionally left as placeholders.
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import ussa1976
@@ -46,7 +47,8 @@ class AtmosphereModel:
                  f107a: float | None = None,
                  ap: float | None = None,
                  lat_deg: float = 0.0,
-                 lon_deg: float = 0.0):
+                 lon_deg: float = 0.0,
+                 cfg_instance: Any = None): # Added cfg_instance
         """Create an atmosphere model.
 
         Parameters
@@ -73,6 +75,7 @@ class AtmosphereModel:
         # Fixed reference location for the high-altitude model (NRLMSIS-like)
         self.lat_deg = lat_deg
         self.lon_deg = lon_deg
+        self.cfg = cfg_instance # Store cfg_instance
 
     def properties(self, altitude: float, t: float | None = None) -> AtmosphereProperties:
         """Return atmospheric properties at a given altitude.
@@ -145,9 +148,9 @@ class AtmosphereModel:
 
         # Use provided solar/geomagnetic inputs if available; otherwise, fall
         # back to simple default values to avoid network downloads.
-        f107 = 150.0 if self.f107 is None else float(self.f107)
-        f107a = 150.0 if self.f107a is None else float(self.f107a)
-        ap = 4.0 if self.ap is None else float(self.ap)
+        f107 = self.f107 if self.f107 is not None else (self.cfg.atmosphere.atmosphere_f107 if self.cfg and self.cfg.atmosphere.atmosphere_f107 is not None else 150.0)
+        f107a = self.f107a if self.f107a is not None else (self.cfg.atmosphere.atmosphere_f107a if self.cfg and self.cfg.atmosphere.atmosphere_f107a is not None else 150.0)
+        ap = self.ap if self.ap is not None else (self.cfg.atmosphere.atmosphere_ap if self.cfg and self.cfg.atmosphere.atmosphere_ap is not None else 4.0)
 
         # aps is expected to be an array-like of length 7. For a simple course
         # project we approximate all 7 Ap-related values with the same daily
@@ -193,9 +196,12 @@ if __name__ == "__main__":
     altitude.
     """
     import matplotlib.pyplot as plt
+    from config import Config # Added for local test instance
+
+    cfg_test = Config() # Local config instance for test
 
     # Create an atmosphere model with default settings.
-    atm = AtmosphereModel(f107=150.0, f107a=150.0, ap=4.0)
+    atm = AtmosphereModel(f107=150.0, f107a=150.0, ap=4.0, cfg_instance=cfg_test) # Pass cfg_test
 
     # Altitude grid: 0--100 km in 5 km steps, then 150--1000 km in 50 km steps.
     altitudes_km = np.concatenate([

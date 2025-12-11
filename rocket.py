@@ -7,11 +7,11 @@ Implementations are placeholders.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import Any, List, Tuple, Optional
 
 import numpy as np
 from gravity import R_EARTH
-from config import CFG
+from config import CFG, Config
 
 
 
@@ -53,6 +53,16 @@ class Engine:
         p = float(np.clip(p_amb, 0.0, self.cfg.physics.P_SL)) # Use self.cfg
         # Fraction of "vacuum-ness": 0 at sea level, 1 in vacuum
         f_vac = 1.0 - p / self.cfg.physics.P_SL # Use self.cfg
+
+        # Interpolate thrust and Isp based on f_vac
+        thrust_interp = self.thrust_sl + (self.thrust_vac - self.thrust_sl) * f_vac
+        isp_interp = self.isp_sl + (self.isp_vac - self.isp_sl) * f_vac
+        
+        # Apply throttle
+        thrust = thrust_interp * throttle
+        isp = isp_interp # Isp is typically not throttled directly; mass flow scales with thrust
+
+        return thrust, isp
 
 
 @dataclass
