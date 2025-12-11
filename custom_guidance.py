@@ -97,15 +97,16 @@ class TwoPhaseUpperThrottle:
     coast to apoapsis, then circularize to raise perigee.
     """
 
-    def __init__(self, target_radius: float, mu: float):
+    def __init__(self, target_radius: float, mu: float, cfg=None):
         self.target_radius = target_radius
         self.mu = mu
+        self.cfg = cfg or CFG
         self.phase = "boost"
         # Calculate target apoapsis for the first burn based on CFG
-        self.target_ap = (CFG.central_body.earth_radius_m + CFG.target_orbit.target_orbit_alt_m) * CFG.throttle_guidance.upper_stage_first_burn_target_ap_factor
+        self.target_ap = self.target_radius * self.cfg.throttle_guidance.upper_stage_first_burn_target_ap_factor
         self.transitions: list[tuple[str, float]] = [("boost", 0.0)]
-        self.first_burn_throttle = CFG.throttle_guidance.upper_stage_first_burn_throttle_setpoint
-        self.circ_burn_throttle = CFG.throttle_guidance.upper_stage_circ_burn_throttle_setpoint
+        self.first_burn_throttle = self.cfg.throttle_guidance.upper_stage_first_burn_throttle_setpoint
+        self.circ_burn_throttle = self.cfg.throttle_guidance.upper_stage_circ_burn_throttle_setpoint
 
     def __call__(self, t: float, state: State) -> float:
         stage_idx = getattr(state, "stage_index", 0)
@@ -129,14 +130,14 @@ class TwoPhaseUpperThrottle:
             if ra is None:
                 return 0.0
             # Coast until near apoapsis (radial velocity ~0 and radius near ra)
-            if abs(vr) < CFG.throttle_guidance.upper_throttle_vr_tolerance and abs(r_norm - ra) < CFG.throttle_guidance.upper_throttle_alt_tolerance:
+            if abs(vr) < self.cfg.throttle_guidance.upper_throttle_vr_tolerance and abs(r_norm - ra) < self.cfg.throttle_guidance.upper_throttle_alt_tolerance:
                 self.phase = "circularize"
                 self.transitions.append(("circularize", t))
                 return self.circ_burn_throttle # Transition to circularize, use configurable throttle
             return 0.0
 
         if self.phase == "circularize":
-            if rp is not None and rp >= self.target_radius - CFG.orbit_tolerances.orbit_alt_tol:
+            if rp is not None and rp >= self.target_radius - self.cfg.orbit_tolerances.orbit_alt_tol:
                 self.phase = "done"
                 self.transitions.append(("done", t))
                 return 0.0

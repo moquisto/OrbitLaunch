@@ -31,7 +31,7 @@ class VehicleConfig:
     booster_thrust_sl: float = 7.6e7
     booster_isp_vac: float = 380.0
     booster_isp_sl: float = 330.0
-    booster_dry_mass: float = 1.8e5    # ~180 t dry
+    booster_dry_mass: float = 1.8e5     # ~180 t dry
     booster_prop_mass: float = 3.4e6    # ~3400 t prop
 
     upper_thrust_vac: float = 1.5e7
@@ -174,75 +174,29 @@ class OutputConfig:
     animate_trajectory: bool = False
 
 
+@dataclass
 class Config:
-    """
-    Nested configuration container with backward-compatible attribute access.
-    Older code can keep using flat attributes (e.g., launch_lat_deg) thanks
-    to __getattr__/__setattr__ forwarding into the nested sub-configs.
-    """
-
-    def __init__(self):
-        object.__setattr__(self, "launch_site", LaunchSiteConfig())
-        object.__setattr__(self, "central_body", CentralBodyConfig())
-        object.__setattr__(self, "target_orbit", TargetOrbitConfig())
-        object.__setattr__(self, "vehicle", VehicleConfig())
-        object.__setattr__(self, "staging", StagingConfig())
-        object.__setattr__(self, "simulation_timing", SimulationTimingConfig())
-        object.__setattr__(self, "orbit_tolerances", OrbitTolerancesConfig())
-        object.__setattr__(self, "path_constraints", PathConstraintsConfig())
-        object.__setattr__(self, "pitch_guidance", PitchGuidanceConfig())
-        object.__setattr__(self, "throttle_guidance", ThrottleGuidanceConfig())
-        object.__setattr__(self, "atmosphere", AtmosphereConfig())
-        object.__setattr__(self, "physics", PhysicsConfig())
-        object.__setattr__(self, "aerodynamics", AerodynamicsConfig())
-        object.__setattr__(self, "termination_logic", TerminationLogicConfig())
-        object.__setattr__(self, "output", OutputConfig())
-        object.__setattr__(
-            self,
-            "_subconfigs",
-            [
-                self.launch_site,
-                self.central_body,
-                self.target_orbit,
-                self.vehicle,
-                self.staging,
-                self.simulation_timing,
-                self.orbit_tolerances,
-                self.path_constraints,
-                self.pitch_guidance,
-                self.throttle_guidance,
-                self.atmosphere,
-                self.physics,
-                self.aerodynamics,
-                self.termination_logic,
-                self.output,
-            ],
-        )
-
-    def __getattr__(self, name):
-        # Forward unknown attributes into nested configs for backward compatibility.
-        for sub in self._subconfigs:
-            if hasattr(sub, name):
-                return getattr(sub, name)
-        raise AttributeError(f"{type(self).__name__} has no attribute '{name}'")
-
-    def __setattr__(self, name, value):
-        if name == "_subconfigs":
-            object.__setattr__(self, name, value)
-            return
-        if "_subconfigs" in self.__dict__:
-            for sub in self._subconfigs:
-                if hasattr(sub, name):
-                    setattr(sub, name, value)
-                    return
-        object.__setattr__(self, name, value)
+    launch_site: LaunchSiteConfig = field(default_factory=LaunchSiteConfig)
+    central_body: CentralBodyConfig = field(default_factory=CentralBodyConfig)
+    target_orbit: TargetOrbitConfig = field(default_factory=TargetOrbitConfig)
+    vehicle: VehicleConfig = field(default_factory=VehicleConfig)
+    staging: StagingConfig = field(default_factory=StagingConfig)
+    simulation_timing: SimulationTimingConfig = field(default_factory=SimulationTimingConfig)
+    orbit_tolerances: OrbitTolerancesConfig = field(default_factory=OrbitTolerancesConfig)
+    path_constraints: PathConstraintsConfig = field(default_factory=PathConstraintsConfig)
+    pitch_guidance: PitchGuidanceConfig = field(default_factory=PitchGuidanceConfig)
+    throttle_guidance: ThrottleGuidanceConfig = field(default_factory=ThrottleGuidanceConfig)
+    atmosphere: AtmosphereConfig = field(default_factory=AtmosphereConfig)
+    physics: PhysicsConfig = field(default_factory=PhysicsConfig)
+    aerodynamics: AerodynamicsConfig = field(default_factory=AerodynamicsConfig)
+    termination_logic: TerminationLogicConfig = field(default_factory=TerminationLogicConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
 
 CFG = Config()
 
 
 if __name__ == "__main__":
     # Running this file directly executes the main simulation with current CFG values.
-    # Use the global CFG instance for the main run.
     from main import main as run_main
 
-    run_main(CFG)
+    run_main()

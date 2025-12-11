@@ -28,13 +28,17 @@ def _install_throttle(sim, cfg_instance):
         module_name, class_name = cfg_instance.throttle_guidance.throttle_guidance_function_class.rsplit('.', 1)
         module = importlib.import_module(module_name)
         ControllerClass = getattr(module, class_name)
-        controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu)
+        try:
+            controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu, cfg=cfg_instance)
+        except TypeError:
+            controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu)
     else:
         raise ValueError(f"Unknown throttle_guidance_mode: '{cfg_instance.throttle_guidance.throttle_guidance_mode}'")
     sim.guidance.throttle_schedule = controller
     return orbit_radius
 
 def run_simulation_wrapper(params, cfg_instance):
+    print(f"DEBUG: Entering run_simulation_wrapper with params: {params[:3]}...") # Debug print
     """Helper to run sim and return (fuel_used, orbit_error_m)"""
     # Access CFG attributes directly here, they are guaranteed to be initialized when this function is called.
     current_target_alt_m = cfg_instance.target_orbit.target_orbit_alt_m
@@ -73,6 +77,7 @@ def run_simulation_wrapper(params, cfg_instance):
         sim, state0, t0 = build_simulation(cfg_instance) # Pass cfg_instance
         orbit_radius = _install_throttle(sim, cfg_instance)
         initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
+        print("DEBUG: Calling sim.run()...") # Debug print
         log = sim.run(
             t0,
             duration=4000.0,

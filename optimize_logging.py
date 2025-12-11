@@ -12,7 +12,6 @@ import importlib
 import numpy as np
 import time
 from scipy.optimize import minimize
-from gravity import MU_EARTH, R_EARTH
 from main import ParameterizedThrottleProgram, build_simulation, orbital_elements_from_state
 from config import CFG
 
@@ -53,14 +52,14 @@ def objective_function(scaled_params):
     p_blend   = scaled_params[3]
 
     # 2. UPDATE CONFIGURATION
-    CFG.meco_mach = float(meco_mach)
-    CFG.pitch_turn_start_m = float(p_start_m)
-    CFG.pitch_turn_end_m = float(p_end_m)
-    CFG.pitch_blend_exp = float(p_blend)
+    CFG.staging.meco_mach = float(meco_mach)
+    CFG.pitch_guidance.pitch_turn_start_m = float(p_start_m)
+    CFG.pitch_guidance.pitch_turn_end_m = float(p_end_m)
+    CFG.pitch_guidance.pitch_blend_exp = float(p_blend)
     
     # Reset tolerances for the "Shot"
-    CFG.orbit_alt_tol = 1e6    
-    CFG.exit_on_orbit = True 
+    CFG.orbit_tolerances.orbit_alt_tol = 1e6    
+    CFG.orbit_tolerances.exit_on_orbit = True 
 
     # 3. RUN SIMULATION
     cost = 0.0
@@ -70,22 +69,26 @@ def objective_function(scaled_params):
 
     try:
         sim, state0, t0 = build_simulation(CFG)
-        orbit_radius = CFG.earth_radius_m + TARGET_ALT_M
-        if CFG.throttle_guidance_mode == 'parameterized':
-            controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
-        elif CFG.throttle_guidance_mode == 'function':
-            module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+        orbit_radius = CFG.central_body.earth_radius_m + TARGET_ALT_M
+        throttle_mode = CFG.throttle_guidance.throttle_guidance_mode
+        if throttle_mode == 'parameterized':
+            controller = ParameterizedThrottleProgram(schedule=CFG.throttle_guidance.upper_stage_throttle_program)
+        elif throttle_mode == 'function':
+            module_name, class_name = CFG.throttle_guidance.throttle_guidance_function_class.rsplit('.', 1)
             module = importlib.import_module(module_name)
             ControllerClass = getattr(module, class_name)
-            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+            try:
+                controller = ControllerClass(target_radius=orbit_radius, mu=CFG.central_body.earth_mu, cfg=CFG)
+            except TypeError:
+                controller = ControllerClass(target_radius=orbit_radius, mu=CFG.central_body.earth_mu)
         else:
-            raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+            raise ValueError(f"Unknown throttle_guidance_mode: '{throttle_mode}'")
         sim.guidance.throttle_schedule = controller
         initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
         
         # Run sim
         log = sim.run(t0, duration=4000.0, dt=1.0, state0=state0, 
-                      orbit_target_radius=R_EARTH + TARGET_ALT_M,
+                      orbit_target_radius=CFG.central_body.earth_radius_m + TARGET_ALT_M,
                       exit_on_orbit=True)
         
         # 4. CALCULATE RESULT
@@ -93,8 +96,8 @@ def objective_function(scaled_params):
         
         r_final = log.r[-1]
         v_final = log.v[-1]
-        a, rp, ra = orbital_elements_from_state(r_final, v_final, MU_EARTH)
-        target_r = R_EARTH + TARGET_ALT_M
+        a, rp, ra = orbital_elements_from_state(r_final, v_final, CFG.central_body.earth_mu)
+        target_r = CFG.central_body.earth_radius_m + TARGET_ALT_M
 
         if rp is None or ra is None:
             # Crash or Hyperbolic

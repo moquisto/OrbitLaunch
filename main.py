@@ -253,7 +253,10 @@ def main(cfg_instance): # Accept cfg_instance
             module = importlib.import_module(module_name)
             ControllerClass = getattr(module, class_name)
             # The original controller class requires target_radius and mu
-            controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu)
+            try:
+                controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu, cfg=cfg_instance)
+            except TypeError:
+                controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu)
         except (ImportError, AttributeError, ValueError) as e:
             raise ImportError(f"Could not load throttle guidance class '{cfg_instance.throttle_guidance.throttle_guidance_function_class}': {e}")
     else:
@@ -290,7 +293,7 @@ def main(cfg_instance): # Accept cfg_instance
     def print_state(label: str, idx: int):
         a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], cfg_instance.central_body.earth_mu)
         rp_alt_i = (rp_i - earth_radius) / 1000.0 if rp_i is not None else None
-        ra_alt_i = (ra - earth_radius) / 1000.0 if ra is not None else None
+        ra_alt_i = (ra_i - earth_radius) / 1000.0 if ra_i is not None else None
         rp_str = f"{rp_alt_i:.2f}" if rp_alt_i is not None else "n/a"
         ra_str = f"{ra_alt_i:.2f}" if ra_alt_i is not None else "n/a"
         print(

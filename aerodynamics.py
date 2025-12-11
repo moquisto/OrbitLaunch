@@ -189,7 +189,7 @@ if __name__ == "__main__":
     print("Saved Cd vs. Mach curve plot to cd_curve.png")
 
     # --- Plot 2: Drag force simulation plots ---
-    earth = EarthModel(mu=MU_test, radius=R_test, omega_vec=OMEGA_test) # Use local vars
+    earth = EarthModel(mu=MU_EARTH, radius=R_EARTH, omega_vec=OMEGA_EARTH)
     atm = AtmosphereModel()
 
     # Simple Cd model for the old test cases
@@ -222,7 +222,7 @@ if __name__ == "__main__":
                           aero: Aerodynamics):
         # ... (rest of the function is unchanged)
         # Initial position at surface, along +x.
-        r = np.array([R_test, 0.0, 0.0], dtype=float) # Use local vars
+        r = np.array([R_EARTH, 0.0, 0.0], dtype=float)
         r_norm = np.linalg.norm(r)
         r_hat = r / r_norm
         v_atm0 = earth.atmosphere_velocity(r)
