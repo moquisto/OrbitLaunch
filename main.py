@@ -24,7 +24,7 @@ from config import CFG
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
-from typing import Tuple
+from typing import Any, Tuple
 
 class ParameterizedPitchProgram:
     """
@@ -76,9 +76,9 @@ class ParameterizedPitchProgram:
         return direction / n if n > 0.0 else r_hat
 
 
-def throttle_schedule(t: float, state: State) -> float:
+def throttle_schedule(t: float, state: State, cfg_instance: Any) -> float: # Added cfg_instance
     """Hold full throttle; adapt here if you want to throttle for max-Q, etc."""
-    return CFG.base_throttle_cmd
+    return cfg_instance.throttle_guidance.base_throttle_cmd
 
 
 class ParameterizedThrottleProgram:
@@ -112,111 +112,117 @@ class ParameterizedThrottleProgram:
         return float(throttle)
 
 
-def build_rocket() -> Rocket:
+def build_rocket(cfg_instance) -> Rocket: # Added cfg_instance parameter
     # Approximate BFR-like stages (order-of-magnitude values)
     booster_engine = Engine(
-        thrust_vac=CFG.booster_thrust_vac,
-        thrust_sl=CFG.booster_thrust_sl,
-        isp_vac=CFG.booster_isp_vac,
-        isp_sl=CFG.booster_isp_sl,
+        thrust_vac=cfg_instance.vehicle.booster_thrust_vac,
+        thrust_sl=cfg_instance.vehicle.booster_thrust_sl,
+        isp_vac=cfg_instance.vehicle.booster_isp_vac,
+        isp_sl=cfg_instance.vehicle.booster_isp_sl,
+        cfg=cfg_instance,
     )
     upper_engine = Engine(
-        thrust_vac=CFG.upper_thrust_vac,
-        thrust_sl=CFG.upper_thrust_sl,
-        isp_vac=CFG.upper_isp_vac,
-        isp_sl=CFG.upper_isp_sl,
+        thrust_vac=cfg_instance.vehicle.upper_thrust_vac,
+        thrust_sl=cfg_instance.vehicle.upper_thrust_sl,
+        isp_vac=cfg_instance.vehicle.upper_isp_vac,
+        isp_sl=cfg_instance.vehicle.upper_isp_sl,
+        cfg=cfg_instance,
     )
 
     booster_stage = Stage(
-        dry_mass=CFG.booster_dry_mass,
-        prop_mass=CFG.booster_prop_mass,
+        dry_mass=cfg_instance.vehicle.booster_dry_mass,
+        prop_mass=cfg_instance.vehicle.booster_prop_mass,
         engine=booster_engine,
-        ref_area=CFG.ref_area_m2,
+        ref_area=cfg_instance.vehicle.ref_area_m2,
     )
     upper_stage = Stage(
-        dry_mass=CFG.upper_dry_mass,
-        prop_mass=CFG.upper_prop_mass,
+        dry_mass=cfg_instance.vehicle.upper_dry_mass,
+        prop_mass=cfg_instance.vehicle.upper_prop_mass,
         engine=upper_engine,
-        ref_area=CFG.ref_area_m2,
+        ref_area=cfg_instance.vehicle.ref_area_m2,
     )
 
     return Rocket(
         stages=[booster_stage, upper_stage],
-        main_engine_ramp_time=CFG.main_engine_ramp_time,
-        upper_engine_ramp_time=CFG.upper_engine_ramp_time,
-        meco_mach=CFG.meco_mach,
-        separation_delay=CFG.separation_delay_s,
-        upper_ignition_delay=CFG.upper_ignition_delay_s,
-        separation_altitude_m=CFG.separation_altitude_m,  # stage on depletion trigger, but separation is time-based
-        earth_radius=CFG.earth_radius_m,
-        min_throttle=CFG.engine_min_throttle,
-        shutdown_ramp_time=CFG.engine_shutdown_ramp_s,
-        throttle_shape_full_threshold=CFG.throttle_full_shape_threshold,
-        mach_ref_speed=CFG.mach_reference_speed,
-        booster_throttle_program=CFG.booster_throttle_program,
+        cfg_instance=cfg_instance,
+        main_engine_ramp_time=cfg_instance.staging.main_engine_ramp_time,
+        upper_engine_ramp_time=cfg_instance.staging.upper_engine_ramp_time,
+        meco_mach=cfg_instance.staging.meco_mach,
+        separation_delay=cfg_instance.staging.separation_delay_s,
+        upper_ignition_delay=cfg_instance.staging.upper_ignition_delay_s,
+        separation_altitude_m=cfg_instance.staging.separation_altitude_m,  # stage on depletion trigger, but separation is time-based
+        earth_radius=cfg_instance.central_body.earth_radius_m,
+        min_throttle=cfg_instance.vehicle.engine_min_throttle,
+        shutdown_ramp_time=cfg_instance.staging.engine_shutdown_ramp_s,
+        throttle_shape_full_threshold=cfg_instance.vehicle.throttle_full_shape_threshold,
+        mach_ref_speed=cfg_instance.vehicle.mach_reference_speed,
+        booster_throttle_program=cfg_instance.throttle_guidance.booster_throttle_program,
     )
 
 
-def build_simulation() -> tuple[Simulation, State, float]:
+def build_simulation(cfg_instance) -> tuple[Simulation, State, float]: # Added cfg_instance parameter
     earth = EarthModel(
-        mu=CFG.earth_mu,
-        radius=CFG.earth_radius_m,
-        omega_vec=np.array(CFG.earth_omega_vec, dtype=float),
-        j2=CFG.j2_coeff if CFG.use_j2 else None,
+        mu=cfg_instance.central_body.earth_mu,
+        radius=cfg_instance.central_body.earth_radius_m,
+        omega_vec=np.array(cfg_instance.central_body.earth_omega_vec, dtype=float),
+        j2=cfg_instance.central_body.j2_coeff if cfg_instance.central_body.use_j2 else None,
     )
     atmosphere = AtmosphereModel(
-        h_switch=CFG.atmosphere_switch_alt_m,
-        lat_deg=CFG.launch_lat_deg,
-        lon_deg=CFG.launch_lon_deg,
-        f107=CFG.atmosphere_f107,
-        f107a=CFG.atmosphere_f107a,
-        ap=CFG.atmosphere_ap,
+        h_switch=cfg_instance.atmosphere.atmosphere_switch_alt_m,
+        lat_deg=cfg_instance.launch_site.launch_lat_deg,
+        lon_deg=cfg_instance.launch_site.launch_lon_deg,
+        f107=cfg_instance.atmosphere.atmosphere_f107,
+        f107a=cfg_instance.atmosphere.atmosphere_f107a,
+        ap=cfg_instance.atmosphere.atmosphere_ap,
     )
-    cd_model = CdModel(mach_dependent_cd)
-    rocket = build_rocket()
-    aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
+    cd_model = CdModel(mach_dependent_cd, cfg_instance) 
+    rocket = build_rocket(cfg_instance) # Pass cfg_instance
+    aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None, cfg=cfg_instance)
     # --- Pitch Program Selection ---
-    if CFG.pitch_guidance_mode == 'parameterized':
+    if cfg_instance.pitch_guidance.pitch_guidance_mode == 'parameterized':
         pitch_program = ParameterizedPitchProgram(
-            schedule=CFG.pitch_program,
-            prograde_threshold=CFG.pitch_prograde_speed_threshold,
-            earth_radius=CFG.earth_radius_m,
+            schedule=cfg_instance.pitch_guidance.pitch_program,
+            prograde_threshold=cfg_instance.pitch_guidance.pitch_prograde_speed_threshold,
+            earth_radius=cfg_instance.central_body.earth_radius_m,
         )
-    elif CFG.pitch_guidance_mode == 'function':
+    elif cfg_instance.pitch_guidance.pitch_guidance_mode == 'function':
         try:
-            module_name, func_name = CFG.pitch_guidance_function.rsplit('.', 1)
+            module_name, func_name = cfg_instance.pitch_guidance.pitch_guidance_function.rsplit('.', 1)
             module = importlib.import_module(module_name)
             pitch_program = getattr(module, func_name)
+            # When using function, pass cfg_instance as a partial application
+            pitch_program = lambda t, state: getattr(module, func_name)(t, state, cfg_instance)
         except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load pitch guidance function '{CFG.pitch_guidance_function}': {e}")
+            raise ImportError(f"Could not load pitch guidance function '{cfg_instance.pitch_guidance.pitch_guidance_function}': {e}")
     else:
-        raise ValueError(f"Unknown pitch_guidance_mode: '{CFG.pitch_guidance_mode}'")
+        raise ValueError(f"Unknown pitch_guidance_mode: '{cfg_instance.pitch_guidance.pitch_guidance_mode}'")
 
-    guidance = Guidance(pitch_program=pitch_program, throttle_schedule=throttle_schedule)
-    integrator_name = str(getattr(CFG, "integrator", "rk4")).lower()
+    guidance = Guidance(pitch_program=pitch_program, throttle_schedule=lambda t, state: throttle_schedule(t, state, cfg_instance)) # Pass cfg_instance
+    integrator_name = str(getattr(cfg_instance.simulation_timing, "integrator", "rk4")).lower()
     if integrator_name in ("rk4", "runge-kutta", "rk"):
         integrator = RK4()
     elif integrator_name in ("velocity_verlet", "verlet", "vv"):
         integrator = VelocityVerlet()
     else:
-        raise ValueError(f"Unknown integrator '{CFG.integrator}'. Expected 'rk4' or 'velocity_verlet'.")
+        raise ValueError(f"Unknown integrator '{cfg_instance.simulation_timing.integrator}'. Expected 'rk4' or 'velocity_verlet'.")
     sim = Simulation(
         earth=earth,
         atmosphere=atmosphere,
         aerodynamics=aero,
         rocket=rocket,
+        cfg_instance=cfg_instance,
         integrator=integrator,
         guidance=guidance,
-        max_q_limit=CFG.max_q_limit,
-        max_accel_limit=CFG.max_accel_limit,
-        impact_altitude_buffer_m=CFG.impact_altitude_buffer_m,
-        escape_radius_factor=CFG.escape_radius_factor,
+        max_q_limit=cfg_instance.path_constraints.max_q_limit,
+        max_accel_limit=cfg_instance.path_constraints.max_accel_limit,
+        impact_altitude_buffer_m=cfg_instance.termination_logic.impact_altitude_buffer_m,
+        escape_radius_factor=cfg_instance.termination_logic.escape_radius_factor,
     )
 
     # Initial state: surface at launch site, co-rotating atmosphere
-    lat = np.deg2rad(CFG.launch_lat_deg)
-    lon = np.deg2rad(CFG.launch_lon_deg)
-    r0 = CFG.earth_radius_m * np.array(
+    lat = np.deg2rad(cfg_instance.launch_site.launch_lat_deg)
+    lon = np.deg2rad(cfg_instance.launch_site.launch_lon_deg)
+    r0 = cfg_instance.central_body.earth_radius_m * np.array(
         [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
         dtype=float,
     )
@@ -232,26 +238,29 @@ def build_simulation() -> tuple[Simulation, State, float]:
     return sim, state0, t0
 
 
-def main():
-    sim, state0, t_env0 = build_simulation()
-    duration = CFG.main_duration_s
-    dt = CFG.main_dt_s
+def main(cfg_instance): # Accept cfg_instance
+    sim, state0, t_env0 = build_simulation(cfg_instance) # Pass cfg_instance to build_simulation
+    duration = cfg_instance.simulation_timing.main_duration_s
+    dt = cfg_instance.simulation_timing.main_dt_s
 
     # --- Throttle Controller Selection ---
-    orbit_radius = CFG.earth_radius_m + CFG.target_orbit_alt_m
-    if CFG.throttle_guidance_mode == 'parameterized':
-        controller = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
-    elif CFG.throttle_guidance_mode == 'function':
+    orbit_radius = cfg_instance.central_body.earth_radius_m + cfg_instance.target_orbit.target_orbit_alt_m
+    if cfg_instance.throttle_guidance.throttle_guidance_mode == 'parameterized':
+        controller = ParameterizedThrottleProgram(schedule=cfg_instance.throttle_guidance.upper_stage_throttle_program)
+    elif cfg_instance.throttle_guidance.throttle_guidance_mode == 'function':
         try:
-            module_name, class_name = CFG.throttle_guidance_function_class.rsplit('.', 1)
+            module_name, class_name = cfg_instance.throttle_guidance.throttle_guidance_function_class.rsplit('.', 1)
             module = importlib.import_module(module_name)
             ControllerClass = getattr(module, class_name)
             # The original controller class requires target_radius and mu
-            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.earth_mu)
+            try:
+                controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu, cfg=cfg_instance)
+            except TypeError:
+                controller = ControllerClass(target_radius=orbit_radius, mu=cfg_instance.central_body.earth_mu)
         except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load throttle guidance class '{CFG.throttle_guidance_function_class}': {e}")
+            raise ImportError(f"Could not load throttle guidance class '{cfg_instance.throttle_guidance.throttle_guidance_function_class}': {e}")
     else:
-        raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance_mode}'")
+        raise ValueError(f"Unknown throttle_guidance_mode: '{cfg_instance.throttle_guidance.throttle_guidance_mode}'")
 
     sim.guidance.throttle_schedule = controller
     log = sim.run(
@@ -260,15 +269,15 @@ def main():
         dt,
         state0,
         orbit_target_radius=orbit_radius,
-        orbit_speed_tolerance=CFG.orbit_speed_tol,
-        orbit_radial_tolerance=CFG.orbit_radial_tol,
-        orbit_alt_tolerance=CFG.orbit_alt_tol,
-        exit_on_orbit=CFG.exit_on_orbit,
-        post_orbit_coast_s=CFG.post_orbit_coast_s,
+        orbit_speed_tolerance=cfg_instance.orbit_tolerances.orbit_speed_tol,
+        orbit_radial_tolerance=cfg_instance.orbit_tolerances.orbit_radial_tol,
+        orbit_alt_tolerance=cfg_instance.orbit_tolerances.orbit_alt_tol,
+        exit_on_orbit=cfg_instance.orbit_tolerances.exit_on_orbit,
+        post_orbit_coast_s=cfg_instance.orbit_tolerances.post_orbit_coast_s,
     )
 
     # Summary
-    earth_radius = CFG.earth_radius_m
+    earth_radius = cfg_instance.central_body.earth_radius_m
     final_alt_km = (np.linalg.norm(log.r[-1]) - earth_radius) / 1000.0
     final_speed = np.linalg.norm(log.v[-1])
     final_mass = log.m[-1]
@@ -278,15 +287,11 @@ def main():
     max_q = max(log.dynamic_pressure)
     stage_switch_times = [log.t_sim[i] for i in range(1, len(log.stage)) if log.stage[i] != log.stage[i - 1]]
     # Basic orbital diagnostics from final state
-    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], CFG.earth_mu)
+    a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], cfg_instance.central_body.earth_mu)
     rp_alt_km = (rp - earth_radius) / 1000.0 if rp is not None else None
     ra_alt_km = (ra - earth_radius) / 1000.0 if ra is not None else None
-    # Key event indices
-    idx_max_alt = int(np.argmax(log.altitude))
-    idx_max_speed = int(np.argmax(log.speed))
-    idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - (sim.rocket.stage_engine_off_complete_time[1] or log.t_sim[-1])))
     def print_state(label: str, idx: int):
-        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], CFG.earth_mu)
+        a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], cfg_instance.central_body.earth_mu)
         rp_alt_i = (rp_i - earth_radius) / 1000.0 if rp_i is not None else None
         ra_alt_i = (ra_i - earth_radius) / 1000.0 if ra_i is not None else None
         rp_str = f"{rp_alt_i:.2f}" if rp_alt_i is not None else "n/a"
@@ -334,16 +339,23 @@ def main():
     if upper_off is not None:
         print(f"Upper engine off at t = {upper_off:.1f} s")
     print(f"Remaining prop (booster, upper): {sim.rocket.stage_prop_remaining}")
+
+    # Calculate indices for print_state calls
+    idx_max_alt = np.argmax(log.altitude)
+    idx_max_speed = np.argmax(log.speed)
+    
     print_state("Max altitude", idx_max_alt)
     print_state("Max speed", idx_max_speed)
-    print_state("Upper engine off", idx_upper_off)
+    if upper_off is not None:
+        idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - upper_off))
+        print_state("Upper engine off", idx_upper_off)
 
-    save_log_to_txt(log, CFG.log_filename)
+    save_log_to_txt(log, cfg_instance.output.log_filename)
     # Enable static trajectory plot; keep animation disabled for headless use.
-    if CFG.plot_trajectory:
-        plot_trajectory_3d(log, CFG.earth_radius_m)
-    if CFG.animate_trajectory:
-        animate_trajectory(log, CFG.earth_radius_m)
+    if cfg_instance.output.plot_trajectory:
+        plot_trajectory_3d(log, cfg_instance.central_body.earth_radius_m)
+    if cfg_instance.output.animate_trajectory:
+        animate_trajectory(log, cfg_instance.central_body.earth_radius_m)
 
 
 def plot_trajectory_3d(log, r_earth: float):
@@ -450,7 +462,6 @@ def animate_trajectory(log, r_earth: float):
     plt.show()
 
 
-
 def save_log_to_txt(log, filename: str):
     """Write simulation states to a text (CSV-style) file for analysis."""
     with open(filename, "w") as f:
@@ -479,4 +490,4 @@ def save_log_to_txt(log, filename: str):
 
 
 if __name__ == "__main__":
-    main()
+    main(CFG)

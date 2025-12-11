@@ -12,13 +12,13 @@ parameter space:
 4. Pitch Blend Exponent
 """
 
+import importlib
 import numpy as np
 import time
 from scipy.optimize import minimize
-from dataclasses import dataclass
 
 # Import your existing environment
-from main import build_simulation, orbital_elements_from_state, MU_EARTH, R_EARTH
+from main import ParameterizedThrottleProgram, build_simulation, orbital_elements_from_state
 from config import CFG
 
 # --- Optimization Configuration ---
@@ -47,28 +47,43 @@ def objective_function(params):
     meco_mach, p_start, p_end, p_blend = params
 
     # 2. Update Configuration (The "Knobs")
-    CFG.launch_lat_deg = LAUNCH_LAT
-    CFG.launch_lon_deg = LAUNCH_LON
-    CFG.target_orbit_alt_m = TARGET_ALT_M
+    CFG.launch_site.launch_lat_deg = LAUNCH_LAT
+    CFG.launch_site.launch_lon_deg = LAUNCH_LON
+    CFG.target_orbit.target_orbit_alt_m = TARGET_ALT_M
     
-    CFG.meco_mach = float(meco_mach)
-    CFG.pitch_turn_start_m = float(p_start)
-    CFG.pitch_turn_end_m = float(p_end)
-    CFG.pitch_blend_exp = float(p_blend)
+    CFG.staging.meco_mach = float(meco_mach)
+    CFG.pitch_guidance.pitch_turn_start_m = float(p_start)
+    CFG.pitch_guidance.pitch_turn_end_m = float(p_end)
+    CFG.pitch_guidance.pitch_blend_exp = float(p_blend)
 
     # Relax tolerances so the sim doesn't "exit early" on a bad orbit, 
     # allowing us to calculate the error magnitude for the optimizer.
-    CFG.orbit_alt_tol = 1e6    
-    CFG.exit_on_orbit = True 
+    CFG.orbit_tolerances.orbit_alt_tol = 1e6    
+    CFG.orbit_tolerances.exit_on_orbit = True 
 
     # 3. Run Simulation (The "Shot")
     try:
-        sim, state0, t0 = build_simulation()
-        initial_mass = state0.m
+        sim, state0, t0 = build_simulation(CFG)
+        orbit_radius = CFG.central_body.earth_radius_m + TARGET_ALT_M
+        throttle_mode = CFG.throttle_guidance.throttle_guidance_mode
+        if throttle_mode == 'parameterized':
+            controller = ParameterizedThrottleProgram(schedule=CFG.throttle_guidance.upper_stage_throttle_program)
+        elif throttle_mode == 'function':
+            module_name, class_name = CFG.throttle_guidance.throttle_guidance_function_class.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            ControllerClass = getattr(module, class_name)
+            try:
+                controller = ControllerClass(target_radius=orbit_radius, mu=CFG.central_body.earth_mu, cfg=CFG)
+            except TypeError:
+                controller = ControllerClass(target_radius=orbit_radius, mu=CFG.central_body.earth_mu)
+        else:
+            raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance.throttle_guidance_mode}'")
+        sim.guidance.throttle_schedule = controller
+        initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
         
         # Run with a generous timeout
         log = sim.run(t0, duration=4000.0, dt=1.0, state0=state0, 
-                      orbit_target_radius=R_EARTH + TARGET_ALT_M,
+                      orbit_target_radius=CFG.central_body.earth_radius_m + TARGET_ALT_M,
                       exit_on_orbit=True) # It will exit if it hits the loose tolerance
     except Exception as e:
         print(f"Sim Failed: {e}")
@@ -77,15 +92,15 @@ def objective_function(params):
     # 4. Calculate Costs
     
     # Fuel Cost
-    fuel_used = initial_mass - log.m[-1]
+    fuel_used = initial_prop - sum(sim.rocket.stage_prop_remaining)
     
     # Orbit Error Cost
     # We want a circular orbit at TARGET_ALT_M
     r_final = log.r[-1]
     v_final = log.v[-1]
-    a, rp, ra = orbital_elements_from_state(r_final, v_final, MU_EARTH)
+    a, rp, ra = orbital_elements_from_state(r_final, v_final, CFG.central_body.earth_mu)
     
-    target_r = R_EARTH + TARGET_ALT_M
+    target_r = CFG.central_body.earth_radius_m + TARGET_ALT_M
 
     if rp is None or ra is None:
         # Crash or Hyperbolic - High Penalty
@@ -169,29 +184,45 @@ def run_optimization():
 
 def verify_solution(best_params):
     """Runs one final simulation with detailed logging using the best found parameters."""
-    CFG.meco_mach = best_params[0]
-    CFG.pitch_turn_start_m = best_params[1]
-    CFG.pitch_turn_end_m = best_params[2]
-    CFG.pitch_blend_exp = best_params[3]
+    CFG.staging.meco_mach = best_params[0]
+    CFG.pitch_guidance.pitch_turn_start_m = best_params[1]
+    CFG.pitch_guidance.pitch_turn_end_m = best_params[2]
+    CFG.pitch_guidance.pitch_blend_exp = best_params[3]
     
     # Use stricter tolerance for verification to see if we ACTUALLY hit it
-    CFG.orbit_alt_tol = 5000.0 # 5km tolerance
-    CFG.exit_on_orbit = True
+    CFG.orbit_tolerances.orbit_alt_tol = 5000.0 # 5km tolerance
+    CFG.orbit_tolerances.exit_on_orbit = True
 
-    sim, state0, t0 = build_simulation()
+    sim, state0, t0 = build_simulation(CFG)
+    orbit_radius = CFG.central_body.earth_radius_m + TARGET_ALT_M
+    throttle_mode = CFG.throttle_guidance.throttle_guidance_mode
+    if throttle_mode == 'parameterized':
+        controller = ParameterizedThrottleProgram(schedule=CFG.throttle_guidance.upper_stage_throttle_program)
+    elif throttle_mode == 'function':
+        module_name, class_name = CFG.throttle_guidance.throttle_guidance_function_class.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        ControllerClass = getattr(module, class_name)
+        try:
+            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.central_body.earth_mu, cfg=CFG)
+        except TypeError:
+            controller = ControllerClass(target_radius=orbit_radius, mu=CFG.central_body.earth_mu)
+    else:
+        raise ValueError(f"Unknown throttle_guidance_mode: '{CFG.throttle_guidance.throttle_guidance_mode}'")
+    sim.guidance.throttle_schedule = controller
+    initial_prop = sum(stage.prop_mass for stage in sim.rocket.stages)
     log = sim.run(t0, duration=5000, dt=0.5, state0=state0, 
-                  orbit_target_radius=R_EARTH + TARGET_ALT_M)
+                  orbit_target_radius=CFG.central_body.earth_radius_m + TARGET_ALT_M)
 
-    fuel_used = state0.m - log.m[-1]
+    fuel_used = initial_prop - sum(sim.rocket.stage_prop_remaining)
     r = log.r[-1]
     v = log.v[-1]
-    a, rp, ra = orbital_elements_from_state(r, v, MU_EARTH)
+    a, rp, ra = orbital_elements_from_state(r, v, CFG.central_body.earth_mu)
     
     print(f"Fuel Used       : {fuel_used:.1f} kg")
     if rp:
-        print(f"Final Perigee   : {(rp - R_EARTH)/1000:.2f} km")
-        print(f"Final Apogee    : {(ra - R_EARTH)/1000:.2f} km")
-        print(f"Orbit Error     : {(abs(rp-(R_EARTH+TARGET_ALT_M)) + abs(ra-(R_EARTH+TARGET_ALT_M)))/1000:.2f} km")
+        print(f"Final Perigee   : {(rp - CFG.central_body.earth_radius_m)/1000:.2f} km")
+        print(f"Final Apogee    : {(ra - CFG.central_body.earth_radius_m)/1000:.2f} km")
+        print(f"Orbit Error     : {(abs(rp-(CFG.central_body.earth_radius_m+TARGET_ALT_M)) + abs(ra-(CFG.central_body.earth_radius_m+TARGET_ALT_M)))/1000:.2f} km")
     else:
         print("Final Result    : No Orbit")
 
