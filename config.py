@@ -10,8 +10,8 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     # Launch site
-    launch_lat_deg: float = 28.60839
-    launch_lon_deg: float = -80.60433
+    launch_lat_deg: float = 0.0
+    launch_lon_deg: float = 0.0
 
     # Central body (can be changed to model other planets)
     earth_mu: float = 3.986_004_418e14          # [m^3/s^2]
@@ -26,30 +26,30 @@ class Config:
     booster_thrust_sl: float = 7.6e7
     booster_isp_vac: float = 380.0
     booster_isp_sl: float = 330.0
-    booster_dry_mass: float = 1.8e5    # ~180 t dry
+    booster_dry_mass: float = 2.0e5    # ~200 t dry (updated from 180t based on recent estimates)
     booster_prop_mass: float = 3.4e6    # ~3400 t prop
 
-    upper_thrust_vac: float = 1.5e7
+    upper_thrust_vac: float = 1.3e7   # ~13 MN (updated from 15 MN based on recent estimates for 6 engines)
     upper_thrust_sl: float = 6.78e6
     upper_isp_vac: float = 380.0
     upper_isp_sl: float = 330.0
-    upper_dry_mass: float = 0.8e5       # ~100 t dry
+    upper_dry_mass: float = 1.2e5       # ~120 t dry (updated from 80t based on recent estimates)
     upper_prop_mass: float = 1.2e6      # ~1200 t prop
 
     ref_area_m2: float = 3.14159265359 * (4.5 ** 2)  # ~9 m dia
-    cd_constant: float = 0.35
+    cd_constant: float = 0.35  # Simplified constant drag coefficient, actual drag varies with Mach and altitude.
     engine_min_throttle: float = 0.4  # Raptor throttle floor (fraction of full thrust)
     use_j2: bool = True
     j2_coeff: float = 1.08262668e-3
 
     # Staging/ramps
-    main_engine_ramp_time: float = 3.0
-    upper_engine_ramp_time: float = 3.0
+    main_engine_ramp_time: float = 1
+    upper_engine_ramp_time: float = 1
     separation_delay_s: float = 5.0     # coast after booster cutoff
     upper_ignition_delay_s: float = 2.0 # settle delay before upper ignition
     engine_shutdown_ramp_s: float = 1.0  # burn-out ramp-down duration for each stage
     throttle_full_shape_threshold: float = 0.99  # shape value considered "full" for min throttle enforcement
-    mach_reference_speed: float = 340.0  # [m/s] reference speed of sound for Mach estimates
+    mach_reference_speed: float = 343  # [m/s] reference speed of sound for Mach estimates
     meco_mach: float = 6.0
     separation_altitude_m: float | None = None
 
@@ -111,15 +111,15 @@ class Config:
     wind_speed_points: list = dataclasses.field(default_factory=lambda: [0.0, 50.0, 0.0])
     mach_cd_map: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 0.25], # Subsonic (increased from 0.15, within 0.2-0.4 range)
-            [0.8, 0.4],  # Approaching transonic, starts increasing
-            [1.0, 0.7],  # Transonic, before peak (increased from 0.6)
-            [1.1, 0.85], # Peak at M=1.1 (increased from 0.65, within 0.5-0.9 range)
-            [1.2, 0.7],  # After peak, decreasing
-            [1.8, 0.6],  # Supersonic, decreasing
-            [3.0, 0.5],  # Supersonic, decreasing
-            [5.0, 0.45], # Supersonic, decreasing
-            [10.0, 0.4]  # Supersonic/Hypersonic, asymptoting
+            [0.0, 0.25],
+            [0.8, 0.35],
+            [1.0, 0.50],
+            [1.1, 0.60],
+            [1.2, 0.50],
+            [2.0, 0.35],
+            [3.0, 0.30],
+            [5.0, 0.25],
+            [10.0, 0.22]
         ]
     )
 

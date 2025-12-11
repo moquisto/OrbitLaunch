@@ -23,7 +23,7 @@ def test_log_iteration_writes_row(tmp_path, monkeypatch):
     monkeypatch.setattr(otw, "LOG_FILENAME", str(log_file))
 
     # minimal params and results
-    params = np.arange(27, dtype=float)
+    params = np.arange(29, dtype=float)
     results = {"cost": 1.23, "fuel": 4.56, "orbit_error": 7.89, "status": "OK"}
 
     # Ensure file exists with header

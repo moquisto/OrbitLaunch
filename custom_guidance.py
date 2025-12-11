@@ -1,7 +1,7 @@
 import numpy as np
-from typing import List, Tuple, Callable
+from typing import List, Tuple, Callable, Optional
 
-def create_pitch_program_callable(pitch_points: List[Tuple[float, float]]) -> Callable[[float, object], np.ndarray]:
+def create_pitch_program_callable(pitch_points: List[Tuple[float, float]], azimuth_deg: Optional[float] = None) -> Callable[[float, object], np.ndarray]:
     """
     Creates a callable pitch program function for the Guidance class.
     
@@ -64,23 +64,28 @@ def create_pitch_program_callable(pitch_points: List[Tuple[float, float]]) -> Ca
         if v_norm < 1.0: # If almost stationary, just go vertical
              return vertical_dir
         
-        # Calculate horizontal direction in the plane defined by r_eci and v_eci
-        # Project v_eci onto the horizontal plane relative to r_eci
-        horizontal_dir_raw = v_eci - np.dot(v_eci, vertical_dir) * vertical_dir
-        horizontal_norm = np.linalg.norm(horizontal_dir_raw)
-        
-        if horizontal_norm < 1e-6: # If purely vertical motion, need another reference.
-            # Arbitrary horizontal direction for pure vertical motion (e.g., along +X ECI)
-            # This is a simplification and might cause issues if the true optimal is not 2D.
-            # A proper 3D guidance would need yaw control or a specified azimuth.
-            # For this exercise, we assume a planar launch.
-            if vertical_dir[2] < 0.9: # If not already pointing mostly up
-                 tangent_dir = np.array([0.0, 0.0, 1.0]) - np.dot(np.array([0.0, 0.0, 1.0]), vertical_dir) * vertical_dir
-            else:
-                 tangent_dir = np.array([1.0, 0.0, 0.0]) - np.dot(np.array([1.0, 0.0, 0.0]), vertical_dir) * vertical_dir
-            tangent_dir = tangent_dir / np.linalg.norm(tangent_dir)
+        # Tangential direction: use azimuth if provided; otherwise use velocity projection.
+        if azimuth_deg is not None:
+            east = np.cross(np.array([0.0, 0.0, 1.0]), vertical_dir)
+            if np.linalg.norm(east) == 0.0:
+                east = np.array([1.0, 0.0, 0.0])
+            east = east / np.linalg.norm(east)
+            north = np.cross(vertical_dir, east)
+            north = north / np.linalg.norm(north)
+            az = np.radians(azimuth_deg)
+            tangent_dir = np.cos(az) * east + np.sin(az) * north
         else:
-            tangent_dir = horizontal_dir_raw / horizontal_norm
+            # Calculate horizontal direction in the plane defined by r_eci and v_eci
+            horizontal_dir_raw = v_eci - np.dot(v_eci, vertical_dir) * vertical_dir
+            horizontal_norm = np.linalg.norm(horizontal_dir_raw)
+            if horizontal_norm < 1e-6:
+                if vertical_dir[2] < 0.9:
+                     tangent_dir = np.array([0.0, 0.0, 1.0]) - np.dot(np.array([0.0, 0.0, 1.0]), vertical_dir) * vertical_dir
+                else:
+                     tangent_dir = np.array([1.0, 0.0, 0.0]) - np.dot(np.array([1.0, 0.0, 0.0]), vertical_dir) * vertical_dir
+                tangent_dir = tangent_dir / np.linalg.norm(tangent_dir)
+            else:
+                tangent_dir = horizontal_dir_raw / horizontal_norm
             
         # The thrust vector is a linear combination of vertical_dir and tangent_dir
         # desired_pitch_rad is the angle from vertical_dir towards tangent_dir
