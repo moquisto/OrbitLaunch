@@ -164,7 +164,7 @@ class Simulation:
         if altitude in self._wind_cache:
             wind_vec = self._wind_cache[altitude]
         else:
-            wind_vec = get_wind_at_altitude(altitude) if CFG.use_jet_stream_model else np.zeros(3)
+            wind_vec = get_wind_at_altitude(altitude) if CFG.atmosphere.use_jet_stream_model else np.zeros(3)
             self._wind_cache[altitude] = wind_vec
 
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
@@ -206,8 +206,8 @@ class Simulation:
         dm_dt = float(dm_dt)
 
         # Diagnostics
-        gamma = CFG.air_gamma
-        R_air = CFG.air_gas_constant
+        gamma = CFG.physics.air_gamma
+        R_air = CFG.physics.air_gas_constant
         a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0

@@ -63,16 +63,20 @@ def simple_pitch_program(t: float, state: State) -> np.ndarray:
     east_norm = np.linalg.norm(east)
     east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
 
-    alt = r_norm - CFG.earth_radius_m
-    # These parameters are now part of the function, but could be read from CFG
-    # if you want to make a configurable function.
-    start = 5_000.0
-    end = 60_000.0
+    alt = r_norm - CFG.central_body.earth_radius_m
     
-    if alt < start:
-        return r_hat
-    elif alt < end:
-        w = (alt - start) / max(end - start, 1.0)
+    start_alt = CFG.pitch_guidance.pitch_turn_start_m
+    end_alt = CFG.pitch_guidance.pitch_turn_end_m
+    
+    if alt < start_alt:
+        initial_pitch_rad = np.deg2rad(CFG.pitch_guidance.initial_pitch_deg)
+        # Blend r_hat (vertical) and east (horizontal) based on initial_pitch_deg
+        # Cos for horizontal component, Sin for vertical component
+        direction = np.sin(initial_pitch_rad) * r_hat + np.cos(initial_pitch_rad) * east
+        n = np.linalg.norm(direction)
+        return direction / n if n > 0.0 else r_hat
+    elif alt < end_alt:
+        w = ((alt - start_alt) / max(end_alt - start_alt, 1.0)) ** CFG.pitch_guidance.pitch_blend_exp
         direction = (1.0 - w) * r_hat + w * east
     else:
         speed = np.linalg.norm(v)
@@ -97,8 +101,11 @@ class TwoPhaseUpperThrottle:
         self.target_radius = target_radius
         self.mu = mu
         self.phase = "boost"
-        self.target_ap = target_radius
+        # Calculate target apoapsis for the first burn based on CFG
+        self.target_ap = (CFG.central_body.earth_radius_m + CFG.target_orbit.target_orbit_alt_m) * CFG.throttle_guidance.upper_stage_first_burn_target_ap_factor
         self.transitions: list[tuple[str, float]] = [("boost", 0.0)]
+        self.first_burn_throttle = CFG.throttle_guidance.upper_stage_first_burn_throttle_setpoint
+        self.circ_burn_throttle = CFG.throttle_guidance.upper_stage_circ_burn_throttle_setpoint
 
     def __call__(self, t: float, state: State) -> float:
         stage_idx = getattr(state, "stage_index", 0)
@@ -112,28 +119,27 @@ class TwoPhaseUpperThrottle:
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
 
         if self.phase == "boost":
-            if ra is not None and ra >= self.target_radius:
+            if ra is not None and ra >= self.target_ap: # Use calculated target_ap
                 self.phase = "coast"
-                self.target_ap = ra
                 self.transitions.append(("coast", t))
                 return 0.0
-            return 1.0
+            return self.first_burn_throttle # Use configurable throttle
 
         if self.phase == "coast":
             if ra is None:
                 return 0.0
             # Coast until near apoapsis (radial velocity ~0 and radius near ra)
-            if abs(vr) < CFG.upper_throttle_vr_tolerance and abs(r_norm - ra) < CFG.upper_throttle_alt_tolerance:
+            if abs(vr) < CFG.throttle_guidance.upper_throttle_vr_tolerance and abs(r_norm - ra) < CFG.throttle_guidance.upper_throttle_alt_tolerance:
                 self.phase = "circularize"
                 self.transitions.append(("circularize", t))
-                return 1.0
+                return self.circ_burn_throttle # Transition to circularize, use configurable throttle
             return 0.0
 
         if self.phase == "circularize":
-            if rp is not None and rp >= self.target_radius - CFG.orbit_alt_tol:
+            if rp is not None and rp >= self.target_radius - CFG.orbit_tolerances.orbit_alt_tol:
                 self.phase = "done"
                 self.transitions.append(("done", t))
                 return 0.0
-            return 1.0
+            return self.circ_burn_throttle # Continue circularize, use configurable throttle
 
         return 0.0

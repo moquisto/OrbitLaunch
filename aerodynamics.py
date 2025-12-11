@@ -13,20 +13,20 @@ from atmosphere import AtmosphereModel
 from config import CFG
 
 
-def get_wind_at_altitude(altitude: float) -> np.ndarray:
+def get_wind_at_altitude(altitude: float, cfg_instance: Any) -> np.ndarray: # Added cfg_instance
     """
     Returns a wind vector based on altitude to model the jet stream.
     The wind profile ramps up to a peak speed in the jet stream layer (8-13 km)
     and is zero outside this band.
     """
-    alt_points = np.array(CFG.wind_alt_points)
+    alt_points = np.array(cfg_instance.aerodynamics.wind_alt_points)
     # Wind from the west (positive Y direction in ECI at launch)
     # reaching a peak of 50 m/s (~112 mph)
-    speed_points = np.array(CFG.wind_speed_points)
+    speed_points = np.array(cfg_instance.aerodynamics.wind_speed_points)
     
     wind_speed = np.interp(altitude, alt_points, speed_points)
     
-    direction = np.asarray(CFG.wind_direction_vec, dtype=float)
+    direction = np.asarray(cfg_instance.aerodynamics.wind_direction_vec, dtype=float)
     norm = np.linalg.norm(direction)
     if norm > 0:
         direction = direction / norm
@@ -34,13 +34,13 @@ def get_wind_at_altitude(altitude: float) -> np.ndarray:
     return direction * wind_speed
 
 
-def mach_dependent_cd(mach: float) -> float:
+def mach_dependent_cd(mach: float, cfg_instance: Any) -> float: # Added cfg_instance
     """
     A representative drag coefficient (Cd) curve for a generic launch vehicle,
     based on the Mach number. This captures the characteristic transonic drag
     rise and subsequent decrease in the supersonic regime.
     """
-    mach_cd_map = np.array(CFG.mach_cd_map)
+    mach_cd_map = np.array(cfg_instance.aerodynamics.mach_cd_map)
     mach_points = mach_cd_map[:, 0]
     cd_points = mach_cd_map[:, 1]
     return np.interp(mach, mach_points, cd_points)
@@ -52,8 +52,9 @@ class CdModel:
     returning Cd as a function of Mach number.
     """
 
-    def __init__(self, value_or_callable: Union[float, Callable[[float], float]] = 2.0):
+    def __init__(self, value_or_callable: Union[float, Callable[[float, Any], float]] = 2.0, cfg_instance: Any = None): # Added cfg_instance and changed callable signature
         self.value_or_callable = value_or_callable
+        self.cfg = cfg_instance # Store cfg_instance
 
     def cd(self, mach: float) -> float:
         """Return drag coefficient for a given Mach number.
@@ -62,7 +63,8 @@ class CdModel:
         If it is a callable, it is evaluated as Cd(Mach).
         """
         if callable(self.value_or_callable):
-            return float(self.value_or_callable(mach))
+            # Pass cfg_instance to the callable
+            return float(self.value_or_callable(mach, self.cfg))
         return float(self.value_or_callable)
 
 
@@ -70,6 +72,7 @@ class CdModel:
 class Aerodynamics:
     atmosphere: AtmosphereModel
     cd_model: CdModel
+    cfg: Any # Store the config instance
     reference_area: Optional[float] = None  # fallback if rocket is not provided
 
     def drag_force(self, state: Any, earth: Any, t: float, rocket: Any = None) -> np.ndarray:
@@ -111,8 +114,8 @@ class Aerodynamics:
         # Air-relative velocity: rocket velocity minus (co-rotating atmosphere + wind).
         v_atm_rotation = np.asarray(earth.atmosphere_velocity(r), dtype=float)
         
-        if CFG.use_jet_stream_model:
-            wind_vector = get_wind_at_altitude(altitude)
+        if self.cfg.atmosphere.use_jet_stream_model: # Use self.cfg
+            wind_vector = get_wind_at_altitude(altitude, self.cfg) # Pass self.cfg
         else:
             wind_vector = np.array([0.0, 0.0, 0.0])
 
@@ -123,8 +126,8 @@ class Aerodynamics:
             return np.zeros(3)
 
         # Speed of sound (ideal gas, dry air) and Mach number.
-        gamma = CFG.air_gamma
-        R_air = CFG.air_gas_constant
+        gamma = self.cfg.physics.air_gamma # Use self.cfg
+        R_air = self.cfg.physics.air_gas_constant # Use self.cfg
         a = np.sqrt(max(gamma * R_air * T, 0.0))
         mach = v_rel_mag / a if a > 0.0 else 0.0
 
@@ -159,6 +162,7 @@ if __name__ == "__main__":
     import numpy as np
 
     from gravity import EarthModel, MU_EARTH, R_EARTH, OMEGA_EARTH
+    from config import Config # Added for local test instance
 
     # --- Plot 1: Representative Cd vs Mach curve ---
     mach_range = np.linspace(0, 10.0, 200)

@@ -21,6 +21,7 @@ class Engine:
     thrust_sl: float
     isp_vac: float
     isp_sl: float
+    cfg: Any # Store the config instance
 
     def thrust_and_isp(self, throttle: float, p_amb: float) -> Tuple[float, float]:
         """
@@ -49,15 +50,9 @@ class Engine:
         throttle = float(np.clip(throttle, 0.0, 1.0))
 
         # Clamp ambient pressure to [0, P_SL] for interpolation
-        p = float(np.clip(p_amb, 0.0, CFG.P_SL))
+        p = float(np.clip(p_amb, 0.0, self.cfg.physics.P_SL)) # Use self.cfg
         # Fraction of "vacuum-ness": 0 at sea level, 1 in vacuum
-        f_vac = 1.0 - p / CFG.P_SL
-
-        thrust_nominal = self.thrust_sl + f_vac * (self.thrust_vac - self.thrust_sl)
-        isp_nominal = self.isp_sl + f_vac * (self.isp_vac - self.isp_sl)
-
-        thrust = throttle * thrust_nominal
-        return thrust, isp_nominal
+        f_vac = 1.0 - p / self.cfg.physics.P_SL # Use self.cfg
 
 
 @dataclass
@@ -122,21 +117,24 @@ class Rocket:
     def __init__(
         self,
         stages: List[Stage],
+        cfg_instance: Any, # New argument
         main_engine_ramp_time: float = 1.0,
         upper_engine_ramp_time: float = 1.0,
         meco_mach: float = 6.0,
         separation_delay: float = 30.0,
         upper_ignition_delay: float = 30.0,
         separation_altitude_m: Optional[float] = None,
-        earth_radius: float = R_EARTH,
+        earth_radius: Optional[float] = None,
         min_throttle: float = 0.0,
         shutdown_ramp_time: float = 1.0,
         throttle_shape_full_threshold: float = 0.99,
         mach_ref_speed: float | None = None,
-        booster_throttle_program: Optional[list] = None, # New parameter
+        booster_throttle_program: Optional[list] = None,
     ):
         if len(stages) < 2:
             raise ValueError("Rocket expects at least two stages (booster + upper stage).")
+
+        self.cfg = cfg_instance # Store cfg_instance
 
         self.stages = stages
         self.main_engine_ramp_time = float(main_engine_ramp_time)
@@ -145,12 +143,13 @@ class Rocket:
         self.separation_delay = float(separation_delay)
         self.upper_ignition_delay = float(upper_ignition_delay)
         self.separation_altitude_m = separation_altitude_m
-        self.earth_radius = float(earth_radius)
+        self.earth_radius = float(earth_radius if earth_radius is not None else self.cfg.central_body.earth_radius_m) # Fallback to self.cfg here
         self.min_throttle = float(np.clip(min_throttle, 0.0, 1.0))
         self.shutdown_ramp_time = float(max(shutdown_ramp_time, 0.0))
         self.throttle_shape_full_threshold = float(np.clip(throttle_shape_full_threshold, 0.0, 1.0))
-        self.mach_ref_speed = float(mach_ref_speed) if mach_ref_speed is not None else CFG.mach_reference_speed
-        self.booster_throttle_program = booster_throttle_program # Store the program
+        self.mach_ref_speed = float(mach_ref_speed) if mach_ref_speed is not None else self.cfg.vehicle.mach_reference_speed # Use self.cfg
+        self.booster_throttle_program = booster_throttle_program if booster_throttle_program is not None else self.cfg.throttle_guidance.booster_throttle_program # Use self.cfg as default
+
 
         # Internal state for event timing
         self.meco_time: float | None = None  # time when Mach first exceeds meco_mach
@@ -380,7 +379,7 @@ class Rocket:
 
         # Mass flow: thrust = Isp * g0 * |dm_dt|
         if thrust_mag > 0.0 and isp > 0.0:
-            dm_dt = -thrust_mag / (isp * CFG.G0)
+            dm_dt = -thrust_mag / (isp * self.cfg.physics.G0)
         else:
             dm_dt = 0.0
 
@@ -496,8 +495,11 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from dataclasses import dataclass
     from types import SimpleNamespace
+    from config import Config # Import Config for local test instance
 
     from atmosphere import AtmosphereModel
+
+    cfg_test = Config() # Local config instance for test
 
     # -----------------------------
     # Local test State definition
@@ -521,6 +523,7 @@ if __name__ == "__main__":
         thrust_sl=7.0e7,     # N  (slightly lower at sea level)
         isp_vac=347.0,       # s  (Super Heavy Raptor vac Isp ~347 s)
         isp_sl=327.0,        # s  (Super Heavy Raptor SL Isp ~327 s)
+        cfg=cfg_test, # Pass cfg_test
     )
     # Approximate combined thrust of Starship upper stage engines
     # (3 sea-level + 3 vacuum Raptors), using rounded values.
@@ -529,6 +532,7 @@ if __name__ == "__main__":
         thrust_sl=1.2e7,     # N  (~12 MN total at sea level)
         isp_vac=380.0,       # s  (vacuum-optimised Raptors)
         isp_sl=330.0,        # s  (sea-level Raptors)
+        cfg=cfg_test, # Pass cfg_test
     )
 
     booster_stage = Stage(
@@ -546,6 +550,7 @@ if __name__ == "__main__":
 
     rocket = Rocket(
         stages=[booster_stage, upper_stage],
+        cfg_instance=cfg_test, # Pass cfg_test
         main_engine_ramp_time=1.0,
         upper_engine_ramp_time=1.0,
         meco_mach=6.0,
@@ -559,8 +564,8 @@ if __name__ == "__main__":
     # Environment and simulation setup
     # -----------------------------
     # Simple point-mass Earth
-    R_E = CFG.earth_radius_m
-    MU_E = CFG.earth_mu
+    R_E = cfg_test.central_body.earth_radius_m # Use cfg_test
+    MU_E = cfg_test.central_body.earth_mu # Use cfg_test
 
     atm = AtmosphereModel()
 
@@ -592,7 +597,7 @@ if __name__ == "__main__":
         r_norm = float(np.linalg.norm(r_vec))
         alt = max(0.0, r_norm - R_E)
         speed = float(np.linalg.norm(v_vec))
-        mach = speed / CFG.mach_reference_speed if CFG.mach_reference_speed > 0.0 else 0.0
+        mach = speed / cfg_test.vehicle.mach_reference_speed if cfg_test.vehicle.mach_reference_speed > 0.0 else 0.0 # Use cfg_test
 
         # Ambient pressure from the atmosphere model
         props = atm.properties(alt, t)
