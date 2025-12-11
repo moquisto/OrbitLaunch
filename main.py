@@ -252,10 +252,8 @@ def build_simulation() -> tuple[Simulation, State, float]:
     m0 = sum(stage.total_mass() for stage in rocket.stages)
     state0 = State(r_eci=r0, v_eci=v0, m=m0, stage_index=0)
 
-    # Use current UTC time as simulation start (seconds since 2000-01-01)
-    now = dt.datetime.now(dt.timezone.utc)
-    base = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
-    t0 = (now - base).total_seconds()
+    # Use a constant start time for deterministic runs.
+    t0 = 0.0
 
     return sim, state0, t0
 
@@ -295,59 +293,76 @@ def main():
         post_orbit_coast_s=CFG.post_orbit_coast_s,
     )
 
-    # Summary
+    # --- Summary ---
+    
+    def format_dist(val_km):
+        """Helper to format distance values that could be None or infinity."""
+        if val_km is None:
+            return "n/a"
+        if np.isinf(val_km):
+            return "inf"
+        return f"{val_km:.2f}"
+
     earth_radius = CFG.earth_radius_m
     final_alt_km = (np.linalg.norm(log.r[-1]) - earth_radius) / 1000.0
     final_speed = np.linalg.norm(log.v[-1])
     final_mass = log.m[-1]
     final_stage = log.stage[-1]
-    max_alt_km = max(log.altitude) / 1000.0
-    max_speed = max(log.speed)
-    max_q = max(log.dynamic_pressure)
+    max_alt_km = max(log.altitude) / 1000.0 if log.altitude else 0.0
+    max_speed = max(log.speed) if log.speed else 0.0
+    max_q = max(log.dynamic_pressure) if log.dynamic_pressure else 0.0
     stage_switch_times = [log.t_sim[i] for i in range(1, len(log.stage)) if log.stage[i] != log.stage[i - 1]]
+    
     # Basic orbital diagnostics from final state
     a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], CFG.earth_mu)
     rp_alt_km = (rp - earth_radius) / 1000.0 if rp is not None else None
     ra_alt_km = (ra - earth_radius) / 1000.0 if ra is not None else None
+    
     # Key event indices
-    idx_max_alt = int(np.argmax(log.altitude))
-    idx_max_speed = int(np.argmax(log.speed))
-    idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - (sim.rocket.stage_engine_off_complete_time[1] or log.t_sim[-1])))
+    idx_max_alt = int(np.argmax(log.altitude)) if log.altitude else 0
+    idx_max_speed = int(np.argmax(log.speed)) if log.speed else 0
+    idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - (sim.rocket.stage_engine_off_complete_time[1] or log.t_sim[-1]))) if log.t_sim else 0
+
     def print_state(label: str, idx: int):
+        if not log.t_sim or idx >= len(log.t_sim):
+            print(f"{label}: Log data not available.")
+            return
+            
         a_i, rp_i, ra_i = orbital_elements_from_state(log.r[idx], log.v[idx], CFG.earth_mu)
         rp_alt_i = (rp_i - earth_radius) / 1000.0 if rp_i is not None else None
         ra_alt_i = (ra_i - earth_radius) / 1000.0 if ra_i is not None else None
-        rp_str = f"{rp_alt_i:.2f}" if rp_alt_i is not None else "n/a"
-        ra_str = f"{ra_alt_i:.2f}" if ra_alt_i is not None else "n/a"
+        
         print(
             f"{label} @ t={log.t_sim[idx]:.1f}s: "
             f"alt={log.altitude[idx]/1000:.2f} km, "
             f"speed={log.speed[idx]:.1f} m/s, "
             f"fpa={log.flight_path_angle_deg[idx]:.2f} deg, "
             f"q={log.dynamic_pressure[idx]:.0f} Pa, "
-            f"rp={rp_str} km, ra={ra_str} km"
+            f"rp={format_dist(rp_alt_i)} km, ra={format_dist(ra_alt_i)} km"
         )
 
     print("\n=== Simulation summary ===")
+    print(f"Cutoff reason: {log.cutoff_reason}")
     print(f"Steps: {len(log.t_sim)}")
-    print(f"Final sim time  : {log.t_sim[-1]:.1f} s")
-    print(f"Final altitude  : {final_alt_km:.2f} km")
-    print(f"Final speed     : {final_speed:.1f} m/s")
-    print(f"Final mass      : {final_mass:.1f} kg")
-    print(f"Final stage idx : {final_stage}")
+    if log.t_sim:
+        print(f"Final sim time  : {log.t_sim[-1]:.1f} s")
+        print(f"Final altitude  : {final_alt_km:.2f} km")
+        print(f"Final speed     : {final_speed:.1f} m/s")
+        print(f"Final mass      : {final_mass:.1f} kg")
+        print(f"Final stage idx : {final_stage}")
     print(f"Max altitude    : {max_alt_km:.2f} km")
     print(f"Max speed       : {max_speed:.1f} m/s")
     print(f"Max q           : {max_q:.1f} Pa")
     print(f"Stage switches  : {stage_switch_times}")
-    if a is not None:
+    if a is not None and not np.isinf(a):
         print(f"Semi-major axis : {a/1000:.2f} km")
-    if rp_alt_km is not None and ra_alt_km is not None:
-        print(f"Perigee altitude: {rp_alt_km:.2f} km")
-        print(f"Apoapsis altitude: {ra_alt_km:.2f} km")
+    print(f"Perigee altitude: {format_dist(rp_alt_km)} km")
+    print(f"Apoapsis altitude: {format_dist(ra_alt_km)} km")
     if log.orbit_achieved:
         print("Orbit target met within tolerances.")
     else:
         print("Orbit target NOT met.")
+        
     # Stage fuel/engine timing diagnostics
     booster_empty = sim.rocket.stage_fuel_empty_time[0]
     upper_empty = sim.rocket.stage_fuel_empty_time[1]
@@ -361,7 +376,8 @@ def main():
         print(f"Upper fuel empty at t = {upper_empty:.1f} s")
     if upper_off is not None:
         print(f"Upper engine off at t = {upper_off:.1f} s")
-    print(f"Remaining prop (booster, upper): {sim.rocket.stage_prop_remaining}")
+    print(f"Remaining prop (booster, upper): {[f'{p:.1f}' for p in sim.rocket.stage_prop_remaining]}")
+    
     print_state("Max altitude", idx_max_alt)
     print_state("Max speed", idx_max_speed)
     print_state("Upper engine off", idx_upper_off)

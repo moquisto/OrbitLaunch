@@ -166,6 +166,17 @@ class Rocket:
         #  - upper_ignition_start_time: upper-stage ramp-up start time
         self.separation_time_planned: float | None = None
         self.upper_ignition_start_time: float | None = None
+        self.reset()
+
+    def reset(self):
+        """Reset all internal time-varying state for a new simulation run."""
+        self.meco_time = None
+        self._last_time = 0.0
+        self.stage_prop_remaining = [s.prop_mass for s in self.stages]
+        self.stage_fuel_empty_time = [None] * len(self.stages)
+        self.stage_engine_off_complete_time = [None] * len(self.stages)
+        self.separation_time_planned = None
+        self.upper_ignition_start_time = None
 
     # ------------------------------------------------------------------
     # Helper methods for stage selection and geometry

@@ -37,6 +37,10 @@ class Guidance:
     ):
         self.pitch_program = pitch_program
         self.throttle_schedule = throttle_schedule
+        self.reset()
+
+    def reset(self):
+        """Reset the internal state of the guidance logic for a new run."""
         self._stage_start_time = 0.0
         self._last_stage_index = None
 
@@ -157,9 +161,8 @@ class Simulation:
         self.max_accel_limit = max_accel_limit
         self.impact_altitude_buffer_m = impact_altitude_buffer_m
         self.escape_radius_factor = escape_radius_factor
-        # Tiny memo caches (cleared each run)
+        # Tiny memoization cache for atmospheric properties (cleared each run)
         self._atmo_cache: dict[tuple[float, float], Any] = {}
-        self._wind_cache: dict[float, np.ndarray] = {}
 
     def _rhs(self, t_env: float, t_sim: float, state: State, control: ControlCommand):
         r = np.asarray(state.r_eci, dtype=float)
@@ -181,31 +184,32 @@ class Simulation:
             self._atmo_cache[props_key] = props
         p_amb = float(props.p)
 
-        wind_vec = get_wind_at_altitude(altitude, r) if CFG.use_jet_stream_model else np.zeros(3)
-
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
-        # Dynamic pressure for limit handling (depends only on v_rel, not thrust)
-        v_atm = self.earth.atmosphere_velocity(r)
-        v_air = v_atm + wind_vec
-        v_rel = v - v_air
-        v_rel_mag = np.linalg.norm(v_rel)
+        
+        # Calculate dynamic pressure 'q' for max-q throttle limiting.
+        # This requires air-relative velocity, which is also calculated inside drag_force.
+        # To avoid changing the drag_force signature, we recalculate it here.
+        # This is a minor inefficiency but keeps the component interface clean.
         rho = float(props.rho)
-        q = 0.5 * rho * v_rel_mag**2
+        if rho > 0:
+            v_atm_rotation = self.earth.atmosphere_velocity(r)
+            wind_vector = get_wind_at_altitude(altitude, r) if CFG.use_jet_stream_model else np.zeros(3)
+            v_air = v_atm_rotation + wind_vector
+            v_rel = v - v_air
+            q = 0.5 * rho * np.dot(v_rel, v_rel)
+        else:
+            q = 0.0
 
         throttle = control.throttle
         if self.max_q_limit is not None and q > self.max_q_limit and q > 0.0:
             throttle = float(np.clip(throttle * (self.max_q_limit / q), 0.0, 1.0))
 
-        # Thrust + mass flow (rocket expects t, throttle, thrust_dir_eci)
+        # Thrust + mass flow
         control_payload = {
             "t": t_sim,
             "throttle": throttle,
             "thrust_dir_eci": control.thrust_direction,
             "dir_is_unit": True,
-            "speed": v_norm,
-            "velocity_vec": v,
-            "air_speed": v_rel_mag,
-            "air_velocity_vec": v_rel,
         }
         F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(control_payload, state, p_amb)
 
@@ -224,9 +228,8 @@ class Simulation:
         dm_dt = float(dm_dt)
 
         # Diagnostics
-        gamma = CFG.air_gamma
-        R_air = CFG.air_gas_constant
-        a_sound = np.sqrt(max(gamma * R_air * float(props.T), 0.0))
+        v_rel_mag = np.linalg.norm(v_rel) if 'v_rel' in locals() else 0.0
+        a_sound = np.sqrt(max(CFG.air_gamma * CFG.air_gas_constant * float(props.T), 0.0))
         mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
         vr = float(np.dot(v, r / r_norm)) if r_norm > 0 else 0.0
         v_horiz = float(np.sqrt(max(v_norm**2 - vr**2, 0.0)))
@@ -235,7 +238,7 @@ class Simulation:
 
         extras = {
             "altitude": altitude,
-            "speed": np.linalg.norm(v),
+            "speed": v_norm,
             "thrust_mag": np.linalg.norm(F_thrust),
             "drag_mag": np.linalg.norm(F_drag),
             "mdot": dm_dt,
@@ -271,26 +274,22 @@ class Simulation:
         t_env = float(t_env_start)
         t_end_sim = duration
         state = state0
-        # Reset rocket internal timers/state for a fresh run
-        state.stage_index = int(getattr(state, "stage_index", 0))
-        self.rocket._last_time = 0.0
-        self.rocket.meco_time = None
-        self.rocket.stage_prop_remaining = [s.prop_mass for s in self.rocket.stages]
-        self.rocket.stage_fuel_empty_time = [None] * len(self.rocket.stages)
-        self.rocket.stage_engine_off_complete_time = [None] * len(self.rocket.stages)
-        self.rocket.separation_time_planned = None
-        self.rocket.upper_ignition_start_time = None
-        orbit_coast_end: float | None = None
+        
+        # Reset stateful components for a fresh run.
+        self.rocket.reset()
+        self.guidance.reset()
         self._atmo_cache.clear()
-        self._wind_cache.clear()
+        
+        # Ensure the simulation starts with the correct stage index from the initial state.
+        state.stage_index = int(getattr(state, "stage_index", 0))
+        
+        orbit_coast_end: float | None = None
 
         while t_sim <= t_end_sim:
             # --- Main Simulation Loop ---
 
             # DEFENSIVE GUARD: Prevent a stale stage_index=1 if the booster still has fuel
-            # and no shutdown/separation timeline has been established. Once MECO, fuel-empty,
-            # or an explicit separation event has scheduled engine-off/upper ignition, this
-            # guard stays out of the way.
+            # and no shutdown/separation timeline has been established.
             if (
                 getattr(state, "stage_index", 0) > 0
                 and self.rocket.stage_fuel_empty_time[0] is None
@@ -319,8 +318,7 @@ class Simulation:
 
             # --- TERMINATION & EVENT CHECKS ---
 
-            # 1. ORBIT ACHIEVED: Check if the vehicle has reached the target circular orbit
-            # within the specified tolerances for altitude, speed, and radial velocity.
+            # 1. ORBIT ACHIEVED
             if orbit_target_radius is not None and orbit_coast_end is None:
                 r_norm = np.linalg.norm(state.r_eci)
                 v_norm = np.linalg.norm(state.v_eci)
@@ -336,29 +334,23 @@ class Simulation:
                     logger.cutoff_reason = "orbit_target_met"
                     if exit_on_orbit:
                         if post_orbit_coast_s > 0.0:
-                            # If orbit is achieved, start a final coast phase.
                             orbit_coast_end = t_sim + post_orbit_coast_s
                         else:
-                            break  # Exit immediately.
+                            break
                     else:
-                        # Continue simulation until duration, or start coast if specified.
                         orbit_coast_end = t_end_sim if post_orbit_coast_s <= 0.0 else t_sim + post_orbit_coast_s
 
-            # If a coast phase has been triggered (e.g., after orbit insertion),
-            # check if it's time to end the simulation.
             if orbit_coast_end is not None and t_sim >= orbit_coast_end:
+                logger.cutoff_reason = "coast_complete"
                 break
 
-            # 2. EARLY TERMINATION (FAILURE CONDITIONS):
-            # These checks stop the simulation for hopeless trajectories to save time.
+            # 2. EARLY TERMINATION (FAILURE CONDITIONS)
             r_norm = np.linalg.norm(state.r_eci)
             altitude = r_norm - self.earth.radius
-            # Impact: Vehicle has crashed into the Earth's surface.
             if altitude < self.impact_altitude_buffer_m:
                 logger.cutoff_reason = "impact"
                 break
-            # Escape: Vehicle has achieved positive specific energy and is heading away
-            # from Earth, indicating it will escape Earth's gravity.
+            
             specific_energy = 0.5 * np.dot(state.v_eci, state.v_eci) - self.earth.mu / r_norm
             vr = float(np.dot(state.v_eci, state.r_eci / r_norm)) if r_norm > 0 else 0.0
             if specific_energy > 0 and vr > 0 and r_norm > self.escape_radius_factor * self.earth.radius:
@@ -366,37 +358,27 @@ class Simulation:
                 break
 
             # --- INTEGRATION & STAGING ---
-
-            # Step the integrator forward by one time step (dt).
             state = self.integrator.step(rhs_cached, state, t_sim, dt)
 
-            # 3. STAGE SEPARATION:
-            # Check the rocket model to see if a stage separation event should occur.
-            # This is the primary event that changes the simulation's stage_index.
+            # 3. STAGE SEPARATION
             if (
                 self.rocket.separation_time_planned is not None
                 and t_sim >= self.rocket.separation_time_planned
-                and getattr(state, "stage_index", 0) == 0  # Only separate if currently stage 0
+                and getattr(state, "stage_index", 0) == 0
             ):
-                stage_idx = getattr(state, "stage_index", 0)
-                if stage_idx == 0:  # Ensure we are indeed in stage 0
-                    # Perform the staging event:
-                    # 1. Subtract remaining prop plus dry mass of the jettisoned stage.
-                    remaining_prop = self.rocket.stage_prop_remaining[stage_idx]
-                    dropped_mass = self.rocket.stages[stage_idx].dry_mass + remaining_prop
-                    state.m = max(state.m - dropped_mass, 1e-6)
-                    self.rocket.stage_prop_remaining[stage_idx] = 0.0
-                    # 2. Advance the stage index for the next iteration.
-                    state.stage_index = min(stage_idx + 1, len(self.rocket.stages) - 1)
-                    # 3. Update the rocket's internal timeline for upper stage ignition.
-                    # This should already be set by MECO, but as a safeguard.
-                    if self.rocket.upper_ignition_start_time is None:
-                        self.rocket.upper_ignition_start_time = self.rocket.separation_time_planned + self.rocket.upper_ignition_delay
-                    # Also set it on the state so throttle controllers can use it
-                    state.upper_ignition_start_time = self.rocket.upper_ignition_start_time
-                    # Mark separation as "done" so it doesn't re-trigger
-                    self.rocket.separation_time_planned = None
-
+                stage_idx = 0
+                remaining_prop = self.rocket.stage_prop_remaining[stage_idx]
+                dropped_mass = self.rocket.stages[stage_idx].dry_mass + remaining_prop
+                state.m = max(state.m - dropped_mass, 1e-6)
+                self.rocket.stage_prop_remaining[stage_idx] = 0.0
+                state.stage_index = 1
+                if self.rocket.upper_ignition_start_time is None:
+                    self.rocket.upper_ignition_start_time = t_sim + self.rocket.upper_ignition_delay
+                
+                # Propagate ignition time to state for other components to see
+                setattr(state, 'upper_ignition_start_time', self.rocket.upper_ignition_start_time)
+                
+                self.rocket.separation_time_planned = None
 
             t_sim += dt
             t_env += dt

@@ -144,38 +144,72 @@ def build_default_params_from_config():
     ], dtype=float)
 
 
-def log_iteration(phase, iteration, params, results):
+from dataclasses import dataclass
+
+@dataclass
+class OptimizationParams:
+    """A structured container for the 35 parameters being optimized."""
+    meco_mach: float
+    booster_pitch_time_0: float
+    booster_pitch_angle_0: float
+    booster_pitch_time_1: float
+    booster_pitch_angle_1: float
+    booster_pitch_time_2: float
+    booster_pitch_angle_2: float
+    booster_pitch_time_3: float
+    booster_pitch_angle_3: float
+    booster_pitch_time_4: float
+    booster_pitch_angle_4: float
+    coast_s: float
+    upper_burn_s: float
+    upper_ignition_delay_s: float
+    azimuth_deg: float
+    upper_pitch_time_0: float
+    upper_pitch_angle_0: float
+    upper_pitch_time_1: float
+    upper_pitch_angle_1: float
+    upper_pitch_time_2: float
+    upper_pitch_angle_2: float
+    upper_throttle_level_0: float
+    upper_throttle_level_1: float
+    upper_throttle_level_2: float
+    upper_throttle_level_3: float
+    upper_throttle_switch_ratio_0: float
+    upper_throttle_switch_ratio_1: float
+    upper_throttle_switch_ratio_2: float
+    booster_throttle_level_0: float
+    booster_throttle_level_1: float
+    booster_throttle_level_2: float
+    booster_throttle_level_3: float
+    booster_throttle_switch_ratio_0: float
+    booster_throttle_switch_ratio_1: float
+    booster_throttle_switch_ratio_2: float
+
+
+def log_iteration(phase: str, iteration: int, params: OptimizationParams, results: dict):
     """Helper to log a single optimizer iteration with de-scaled physics values."""
-    meco_mach, pitch_time_0, pitch_angle_0, pitch_time_1, pitch_angle_1, pitch_time_2, pitch_angle_2, \
-    pitch_time_3, pitch_angle_3, pitch_time_4, pitch_angle_4, \
-    coast_s, upper_burn_s, upper_ignition_delay_s, azimuth_deg, \
-    upper_pitch_time_0, upper_pitch_angle_0, upper_pitch_time_1, upper_pitch_angle_1, upper_pitch_time_2, upper_pitch_angle_2, \
-    upper_throttle_level_0, upper_throttle_level_1, upper_throttle_level_2, upper_throttle_level_3, \
-    upper_throttle_switch_ratio_0, upper_throttle_switch_ratio_1, upper_throttle_switch_ratio_2, \
-    booster_throttle_level_0, booster_throttle_level_1, booster_throttle_level_2, booster_throttle_level_3, \
-    booster_throttle_switch_ratio_0, booster_throttle_switch_ratio_1, booster_throttle_switch_ratio_2 = params
     with open(LOG_FILENAME, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             phase,
             iteration,
-            f"{meco_mach:.4f}",
-            f"{pitch_time_0:.1f}", f"{pitch_angle_0:.1f}",
-            f"{pitch_time_1:.1f}", f"{pitch_angle_1:.1f}",
-            f"{pitch_time_2:.1f}", f"{pitch_angle_2:.1f}",
-            f"{pitch_time_3:.1f}", f"{pitch_angle_3:.1f}",
-            f"{pitch_time_4:.1f}", f"{pitch_angle_4:.1f}",
-            f"{coast_s:.1f}",
-            f"{upper_burn_s:.1f}",
-            f"{upper_ignition_delay_s:.1f}",
-            f"{azimuth_deg:.1f}",
-            f"{upper_pitch_time_0:.1f}", f"{upper_pitch_angle_0:.1f}",
-            f"{upper_pitch_time_1:.1f}", f"{upper_pitch_angle_1:.1f}",
-            f"{upper_pitch_time_2:.1f}", f"{upper_pitch_angle_2:.1f}",
-            f"{upper_throttle_level_0:.2f}", f"{upper_throttle_level_1:.2f}", f"{upper_throttle_level_2:.2f}", f"{upper_throttle_level_3:.2f}",
-            f"{upper_throttle_switch_ratio_0:.2f}", f"{upper_throttle_switch_ratio_1:.2f}", f"{upper_throttle_switch_ratio_2:.2f}",
-            f"{booster_throttle_level_0:.2f}", f"{booster_throttle_level_1:.2f}", f"{booster_throttle_level_2:.2f}", f"{booster_throttle_level_3:.2f}",
-            f"{booster_throttle_switch_ratio_0:.2f}", f"{booster_throttle_switch_ratio_1:.2f}", f"{booster_throttle_switch_ratio_2:.2f}",
+            f"{params.meco_mach:.4f}",
+            f"{params.booster_pitch_time_0:.1f}", f"{params.booster_pitch_angle_0:.1f}",
+            f"{params.booster_pitch_time_1:.1f}", f"{params.booster_pitch_angle_1:.1f}",
+            f"{params.booster_pitch_time_2:.1f}", f"{params.booster_pitch_angle_2:.1f}",
+            f"{params.booster_pitch_time_3:.1f}", f"{params.booster_pitch_angle_3:.1f}",
+            f"{params.booster_pitch_time_4:.1f}", f"{params.booster_pitch_angle_4:.1f}",
+            f"{params.coast_s:.1f}",
+            f"{params.upper_burn_s:.1f}",
+            f"{params.upper_ignition_delay_s:.1f}",
+            f"{params.azimuth_deg:.1f}",
+            f"{params.upper_pitch_time_0:.1f}", f"{params.upper_pitch_angle_0:.1f}",
+            f"{params.upper_pitch_time_1:.1f}", f"{params.upper_pitch_angle_1:.1f}",
+            f"{params.upper_pitch_time_2:.1f}", f"{params.upper_pitch_angle_2:.1f}",
+            f"{params.upper_throttle_level_0:.2f}", f"{params.upper_throttle_level_1:.2f}", f"{params.upper_throttle_level_2:.2f}", f"{params.upper_throttle_level_3:.2f}",
+            f"{params.upper_throttle_switch_ratio_0:.2f}", f"{params.upper_throttle_switch_ratio_1:.2f}", f"{params.upper_throttle_switch_ratio_2:.2f}",
+            f"{params.booster_throttle_level_0:.2f}", f"{params.booster_throttle_level_1:.2f}", f"{params.booster_throttle_level_2:.2f}", f"{params.booster_throttle_level_3:.2f}",
+            f"{params.booster_throttle_switch_ratio_0:.2f}", f"{params.booster_throttle_switch_ratio_1:.2f}", f"{params.booster_throttle_switch_ratio_2:.2f}",
             f"{results.get('cost', 0.0):.2f}",
             f"{results.get('fuel', 0.0):.2f}",
             f"{results.get('orbit_error', results.get('error', 0.0)):.2f}",
@@ -207,47 +241,35 @@ def ensure_log_header():
                 "cost", "fuel", "orbit_error", "status",
             ])
 
-def run_simulation_wrapper(scaled_params):
-    """
-    Runs the simulation with scaled input parameters.
-    The optimizer works with small, normalized numbers (e.g., kilometers for altitude).
-    This function de-scales them into real physics units (meters) for the simulation.
-    Returns a dictionary with detailed results.
-    """
-    # 1. DE-SCALE PARAMETERS for physics simulation
-    meco_mach, \
-    pitch_time_0, pitch_angle_0, \
-    pitch_time_1, pitch_angle_1, \
-    pitch_time_2, pitch_angle_2, \
-    pitch_time_3, pitch_angle_3, \
-    pitch_time_4, pitch_angle_4, \
-    coast_s, upper_burn_s, upper_ignition_delay_s, azimuth_deg, \
-    upper_pitch_time_0, upper_pitch_angle_0, upper_pitch_time_1, upper_pitch_angle_1, upper_pitch_time_2, upper_pitch_angle_2, \
-    upper_throttle_level_0, upper_throttle_level_1, upper_throttle_level_2, upper_throttle_level_3, \
-    upper_throttle_switch_ratio_0, upper_throttle_switch_ratio_1, upper_throttle_switch_ratio_2, \
-    booster_throttle_level_0, booster_throttle_level_1, booster_throttle_level_2, booster_throttle_level_3, \
-    booster_throttle_switch_ratio_0, booster_throttle_switch_ratio_1, booster_throttle_switch_ratio_2 = scaled_params
 
+def run_simulation_wrapper(params: OptimizationParams):
+    """
+    Runs the simulation with a structured parameter object.
+    This function de-scales parameters into real physics units for the simulation
+    and returns a dictionary with detailed results.
+    """
+    # 1. DE-SCALE AND PREPARE PARAMETERS for physics simulation
     # Pitch angles are treated consistently with the config: 0 = horizontal, 90 = vertical.
-    pitch_angle_0 = np.clip(pitch_angle_0, 0.0, 90.0)
-    pitch_angle_1 = np.clip(pitch_angle_1, 0.0, 90.0)
-    pitch_angle_2 = np.clip(pitch_angle_2, 0.0, 90.0)
-    pitch_angle_3 = np.clip(pitch_angle_3, 0.0, 90.0)
-    pitch_angle_4 = np.clip(pitch_angle_4, 0.0, 90.0)
+    pitch_angles = np.clip([
+        params.booster_pitch_angle_0, params.booster_pitch_angle_1, params.booster_pitch_angle_2,
+        params.booster_pitch_angle_3, params.booster_pitch_angle_4
+    ], 0.0, 90.0)
     
     # Ensure pitch times are ordered and valid (s)
-    pitch_times_raw = np.array([pitch_time_0, pitch_time_1, pitch_time_2, pitch_time_3, pitch_time_4])
-    pitch_angles_deg_raw = np.array([pitch_angle_0, pitch_angle_1, pitch_angle_2, pitch_angle_3, pitch_angle_4])
+    pitch_times_raw = np.array([
+        params.booster_pitch_time_0, params.booster_pitch_time_1, params.booster_pitch_time_2,
+        params.booster_pitch_time_3, params.booster_pitch_time_4
+    ])
     
     # Sort them to define the pitch program
     pitch_order = np.argsort(pitch_times_raw)
     pitch_times = pitch_times_raw[pitch_order]
-    pitch_angles_deg = pitch_angles_deg_raw[pitch_order]
+    pitch_angles_deg = pitch_angles[pitch_order]
 
     # Upper-stage pitch schedule (relative to upper ignition)
-    upper_pitch_times_raw = np.array([upper_pitch_time_0, upper_pitch_time_1, upper_pitch_time_2])
+    upper_pitch_times_raw = np.array([params.upper_pitch_time_0, params.upper_pitch_time_1, params.upper_pitch_time_2])
     upper_pitch_angles_deg_raw = np.clip(
-        np.array([upper_pitch_angle_0, upper_pitch_angle_1, upper_pitch_angle_2]),
+        np.array([params.upper_pitch_angle_0, params.upper_pitch_angle_1, params.upper_pitch_angle_2]),
         0.0, 90.0,
     )
     upper_pitch_order = np.argsort(upper_pitch_times_raw)
@@ -255,53 +277,42 @@ def run_simulation_wrapper(scaled_params):
     upper_pitch_angles_deg = upper_pitch_angles_deg_raw[upper_pitch_order]
 
     # Ensure throttle levels and switch ratios are within [0, 1]
-    upper_throttle_levels = np.clip([upper_throttle_level_0, upper_throttle_level_1, upper_throttle_level_2, upper_throttle_level_3], 0.0, 1.0)
-    upper_throttle_switch_ratios = np.clip([upper_throttle_switch_ratio_0, upper_throttle_switch_ratio_1, upper_throttle_switch_ratio_2], 0.0, 1.0)
-    upper_throttle_switch_ratios.sort() # Ensure ratios are increasing
+    upper_throttle_levels = np.clip([params.upper_throttle_level_0, params.upper_throttle_level_1, params.upper_throttle_level_2, params.upper_throttle_level_3], 0.0, 1.0)
+    upper_throttle_switch_ratios = np.clip([params.upper_throttle_switch_ratio_0, params.upper_throttle_switch_ratio_1, params.upper_throttle_switch_ratio_2], 0.0, 1.0)
+    upper_throttle_switch_ratios.sort()  # Ensure ratios are increasing
     
-    booster_throttle_levels = np.clip([booster_throttle_level_0, booster_throttle_level_1, booster_throttle_level_2, booster_throttle_level_3], 0.0, 1.0)
-    booster_throttle_switch_ratios = np.clip([booster_throttle_switch_ratio_0, booster_throttle_switch_ratio_1, booster_throttle_switch_ratio_2], 0.0, 1.0)
-    booster_throttle_switch_ratios.sort() # Ensure ratios are increasing
+    booster_throttle_levels = np.clip([params.booster_throttle_level_0, params.booster_throttle_level_1, params.booster_throttle_level_2, params.booster_throttle_level_3], 0.0, 1.0)
+    booster_throttle_switch_ratios = np.clip([params.booster_throttle_switch_ratio_0, params.booster_throttle_switch_ratio_1, params.booster_throttle_switch_ratio_2], 0.0, 1.0)
+    booster_throttle_switch_ratios.sort()  # Ensure ratios are increasing
 
     # 2. UPDATE CONFIGURATION
-    CFG.meco_mach = float(meco_mach)
-
-    # Keep the factory setup happy, then override with our custom pitch program below.
+    CFG.meco_mach = float(params.meco_mach)
     CFG.pitch_guidance_mode = 'parameterized' 
-    
-    # Second stage parameters
-    CFG.separation_delay_s = float(coast_s)
-    CFG.upper_ignition_delay_s = float(upper_ignition_delay_s)
+    CFG.separation_delay_s = float(params.coast_s)
+    CFG.upper_ignition_delay_s = float(params.upper_ignition_delay_s)
 
     # Construct upper stage throttle program
     upper_throttle_program = []
     current_time_ratio = 0.0
-    upper_throttle_program.append([current_time_ratio * upper_burn_s, upper_throttle_levels[0]])
+    upper_throttle_program.append([current_time_ratio * params.upper_burn_s, upper_throttle_levels[0]])
     
     for i in range(len(upper_throttle_switch_ratios)):
         switch_ratio = upper_throttle_switch_ratios[i]
         throttle_level = upper_throttle_levels[i+1]
         
-        # Ensure switch ratios are distinct and increasing
         if switch_ratio > current_time_ratio:
-            upper_throttle_program.append([switch_ratio * upper_burn_s, upper_throttle_levels[i]]) # Maintain previous throttle until switch time
-            upper_throttle_program.append([switch_ratio * upper_burn_s + 1e-6, throttle_level]) # Small delta for switch
+            upper_throttle_program.append([switch_ratio * params.upper_burn_s, upper_throttle_levels[i]])
+            upper_throttle_program.append([switch_ratio * params.upper_burn_s + 1e-6, throttle_level])
             current_time_ratio = switch_ratio
-        else: # Handle cases where ratios might be too close or identical after sorting/clipping
-            upper_throttle_program[-1][1] = throttle_level # Update previous throttle level if ratios are same
+        else:
+            upper_throttle_program[-1][1] = throttle_level
             
-    # Ensure final segment lasts until upper_burn_s
-    upper_throttle_program.append([upper_burn_s, upper_throttle_levels[-1]])
-    # Add a cut-off
-    upper_throttle_program.append([upper_burn_s + 1, 0.0])
-    
+    upper_throttle_program.append([params.upper_burn_s, upper_throttle_levels[-1]])
+    upper_throttle_program.append([params.upper_burn_s + 1, 0.0])
     CFG.upper_stage_throttle_program = upper_throttle_program
 
     # Construct booster throttle program
     booster_throttle_program = []
-    # Assuming booster starts at full throttle (or defined by first level) and we define relative switch times
-    # Max duration for booster burn is roughly CFG.stage_1_burn_time_s (from rocket.py, often around 160s)
-    # Let's use a proxy for booster burn duration for the ratios, calculated from config.
     mdot_approx = CFG.booster_thrust_sl / (CFG.booster_isp_sl * CFG.G0)
     booster_burn_duration_proxy = CFG.booster_prop_mass / mdot_approx if mdot_approx > 0 else 160.0
     
@@ -319,51 +330,26 @@ def run_simulation_wrapper(scaled_params):
         else:
             booster_throttle_program[-1][1] = throttle_level
             
-    # Ensure a final value is set, and it handles MECO internally
     booster_throttle_program.append([booster_burn_duration_proxy, booster_throttle_levels[-1]])
-    booster_throttle_program.append([booster_burn_duration_proxy + 1, 0.0]) # Ensure it eventually cuts off
-    
+    booster_throttle_program.append([booster_burn_duration_proxy + 1, 0.0])
     CFG.booster_throttle_program = booster_throttle_program
     
-    CFG.orbit_alt_tol = 1e6    # Loosen tolerance for the optimizer's internal check
-    CFG.exit_on_orbit = False  # IMPORTANT: Simulate through second stage burn
+    CFG.orbit_alt_tol = 1e6
+    CFG.exit_on_orbit = False
     
-    results = {
-        "fuel": 0.0,
-        "error": PENALTY_CRASH,  # Default to a high error
-        "status": "INIT",
-        "cost": PENALTY_CRASH
-    }
+    results = {"fuel": 0.0, "error": PENALTY_CRASH, "status": "INIT", "cost": PENALTY_CRASH}
     
     try:
         sim, state0, t0 = build_simulation()
 
-        # Apply the parameterized throttle program for the upper stage
-        throttle_controller = ParameterizedThrottleProgram(
-            schedule=CFG.upper_stage_throttle_program)
-        sim.guidance.throttle_schedule = throttle_controller
+        sim.guidance.throttle_schedule = ParameterizedThrottleProgram(schedule=CFG.upper_stage_throttle_program)
+        sim.rocket.booster_throttle_program = ParameterizedThrottleProgram(schedule=CFG.booster_throttle_program, apply_to_stage0=True)
         
-        # Apply the parameterized throttle program for the booster
-        booster_throttle_controller = ParameterizedThrottleProgram(
-            schedule=CFG.booster_throttle_program, apply_to_stage0=True)
-        sim.rocket.booster_throttle_program = booster_throttle_controller
-        
-        # Create and apply stage-aware pitch program
-        booster_pitch_points = [
-            (pitch_times[0], pitch_angles_deg[0]),
-            (pitch_times[1], pitch_angles_deg[1]),
-            (pitch_times[2], pitch_angles_deg[2]),
-            (pitch_times[3], pitch_angles_deg[3]),
-            (pitch_times[4], pitch_angles_deg[4])
-        ]
-        upper_pitch_points = [
-            (upper_pitch_times[0], upper_pitch_angles_deg[0]),
-            (upper_pitch_times[1], upper_pitch_angles_deg[1]),
-            (upper_pitch_times[2], upper_pitch_angles_deg[2]),
-        ]
+        booster_pitch_points = list(zip(pitch_times, pitch_angles_deg))
+        upper_pitch_points = list(zip(upper_pitch_times, upper_pitch_angles_deg))
 
-        booster_pitch_fn = create_pitch_program_callable(booster_pitch_points, azimuth_deg=azimuth_deg)
-        upper_pitch_fn = create_pitch_program_callable(upper_pitch_points, azimuth_deg=azimuth_deg)
+        booster_pitch_fn = create_pitch_program_callable(booster_pitch_points, azimuth_deg=params.azimuth_deg)
+        upper_pitch_fn = create_pitch_program_callable(upper_pitch_points, azimuth_deg=params.azimuth_deg)
 
         def stage_pitch_program(t, state, t_stage=None, stage_index=None):
             idx = stage_index if stage_index is not None else getattr(state, "stage_index", 0)
@@ -376,44 +362,30 @@ def run_simulation_wrapper(scaled_params):
         
         initial_mass = state0.m
 
-        # Coarse pass for speed; refine only if promising
-        coarse_log = sim.run(t0, duration=2000.0, dt=2.0, state0=state0,
-                             orbit_target_radius=R_EARTH + TARGET_ALT_M,
-                             exit_on_orbit=False)
+        coarse_log = sim.run(t0, duration=2000.0, dt=2.0, state0=state0, orbit_target_radius=R_EARTH + TARGET_ALT_M, exit_on_orbit=False)
         max_altitude_coarse = max(coarse_log.altitude) if coarse_log.altitude else 0.0
         if max_altitude_coarse < 50_000.0:
             results["status"] = "CRASH"
             results["error"] = 1e7 + (TARGET_ALT_M - max_altitude_coarse)
             return results
 
-        # Run sim - longer duration to account for coast and second burn
-        log = sim.run(t0, duration=3000.0, dt=1.0, state0=state0,
-                      orbit_target_radius=R_EARTH + TARGET_ALT_M,
-                      exit_on_orbit=False)
+        log = sim.run(t0, duration=3000.0, dt=1.0, state0=state0, orbit_target_radius=R_EARTH + TARGET_ALT_M, exit_on_orbit=False)
         results["fuel"] = initial_mass - log.m[-1]
         max_altitude = max(log.altitude) if log.altitude else 0.0
 
         r, v = log.r[-1], log.v[-1]
         a, rp, ra = orbital_elements_from_state(r, v, MU_EARTH)
 
-        final_r_vec = log.r[-1]
-        final_altitude = np.linalg.norm(final_r_vec) - R_EARTH
-
-        # Crashed (with buffer)
         if rp is None or ra is None or rp < (R_EARTH - 5000):
             results["status"] = "CRASH"
-            # New penalty function: Use max altitude to create a stronger gradient
-            # The 1e7 constant ensures this is always worse than a non-crash scenario.
-            # The second term encourages the optimizer to achieve higher altitudes.
-            error = 1e7 + (TARGET_ALT_M - max_altitude)
-            results["error"] = error
+            results["error"] = 1e7 + (TARGET_ALT_M - max_altitude)
             return results
 
         target_r = R_EARTH + TARGET_ALT_M
         results["error"] = abs(rp - target_r) + abs(ra - target_r)
 
         perigee_alt = rp - R_EARTH
-        ecc = abs((ra - rp) / (ra + rp)) if (ra is not None and rp is not None and (ra + rp) != 0) else None
+        ecc = abs((ra - rp) / (ra + rp)) if (ra + rp) != 0 else 0
         results["perigee_alt_m"] = perigee_alt
         results["eccentricity"] = ecc
 
@@ -431,13 +403,11 @@ def run_simulation_wrapper(scaled_params):
             results["status"] = "OK"
 
     except IndexError:
-        # This can happen if the simulation ends prematurely (e.g., crash before MECO)
         results["status"] = "SIM_FAIL_INDEX"
     except Exception:
         results["status"] = "SIM_FAIL_UNKNOWN"
     finally:
-        # Ensure both keys exist for downstream logging
-        results["orbit_error"] = results.get("orbit_error", results.get("error", PENALTY_CRASH))
+        results["orbit_error"] = results.get("error", PENALTY_CRASH)
 
     return results
 
@@ -454,33 +424,32 @@ def soft_bounds_penalty(scaled_params, bounds):
 # ...
 
 
-def objective_phase1(scaled_params):
-    global global_iter_count, last_params_phase1, last_cost_phase1, stuck_counter_phase1
-    print(f"DEBUG: Entering objective_phase1, iteration {global_iter_count.value}", flush=True) # Added flush=True here too
-
+def objective_phase1(scaled_params: np.ndarray):
+    """Objective function for Phase 1: Minimize orbital error."""
+    global global_iter_count
     global_iter_count.value += 1
-
-    results = run_simulation_wrapper(scaled_params)
-    results['cost'] = results['error']  # Cost for phase 1 is just the error
-    # Apply soft bounds penalty
+    
+    params_obj = OptimizationParams(*scaled_params)
+    results = run_simulation_wrapper(params_obj)
+    
+    results['cost'] = results['error']
     bound_penalty = soft_bounds_penalty(scaled_params, bounds)
     results['cost'] += bound_penalty
 
-    log_iteration("Phase 1", global_iter_count.value, scaled_params, results)
+    log_iteration("Phase 1", global_iter_count.value, params_obj, results)
     print(
         f"[Phase 1] Iter {global_iter_count.value:3d} | Error: {results['error']/1000:.1f} km | Status: {results['status']}", flush=True)
-
-    last_cost_phase1 = results['cost']
 
     return results['cost']
 
 
-def objective_phase2(scaled_params):
-    global global_iter_count, last_params_phase2, last_cost_phase2, stuck_counter_phase2
-
+def objective_phase2(scaled_params: np.ndarray):
+    """Objective function for Phase 2: Minimize fuel usage."""
+    global global_iter_count
     global_iter_count.value += 1
 
-    results = run_simulation_wrapper(scaled_params)
+    params_obj = OptimizationParams(*scaled_params)
+    results = run_simulation_wrapper(params_obj)
     fuel, error = results["fuel"], results["error"]
 
     # Penalize heavily if we stray too far from the target orbit
@@ -489,17 +458,15 @@ def objective_phase2(scaled_params):
         cost = fuel + penalty
     else:
         cost = fuel
-    # Apply soft bounds penalty
+        
     bound_penalty = soft_bounds_penalty(scaled_params, bounds)
     cost += bound_penalty
     results['cost'] = cost
 
-    log_iteration("Phase 2", global_iter_count.value, scaled_params, results)
+    log_iteration("Phase 2", global_iter_count.value, params_obj, results)
     print(f"[Phase 2] Iter {global_iter_count.value:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", flush=True)
 
-    last_cost_phase2 = results['cost']
-
-    return results['cost']
+    return cost
 
 
 def run_cma_phase(objective_fn, bounds, start=None, sigma_scale=0.2, maxiter=200, popsize=None):

@@ -56,7 +56,6 @@ class Config:
 
     # Aero / Dimensions
     ref_area_m2: float = 63.62  # A = pi * r^2 = pi * (4.5)^2 ≈ 63.62 m^2
-    cd_constant: float = 0.30   # Dropped slightly. Cylinder is high drag, but hypersonic wave drag varies. 0.3 is a safe average.
     engine_min_throttle: float = 0.4  # Raptor deep throttle limit
     throttle_full_shape_threshold: float = 0.99  # shape value considered "full" for min throttle enforcement
     use_j2: bool = True
@@ -76,7 +75,7 @@ class Config:
 
     # --- Simulation Config ---
     main_duration_s: float = 10000
-    main_dt_s: float = 1  # INCREASED PRECISION: 20Hz (0.05s) is safer for high-thrust/high-drag dynamics.
+    main_dt_s: float = 0.05  # 20Hz is a safer default for high-thrust/high-drag dynamics.
     integrator: str = "rk4"
 
     # --- Constraints ---
@@ -86,10 +85,10 @@ class Config:
     # --- Guidance Programs ---
 
     # Pitch Program (Gravity Turn) — time-based, separate booster/upper schedules
-    # Must maintain positive pitch > 0 until near apogee to reach 420km.
     pitch_guidance_mode: str = "parameterized"
     pitch_guidance_function: str = "custom_guidance.simple_pitch_program"
     # Booster pitch schedule (time from liftoff, deg from horizontal)
+    # Realistic duration is ~145s, so points beyond that are not useful.
     pitch_program: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 89.8],    # Vertical clear of tower
@@ -97,10 +96,7 @@ class Config:
             [40.0, 72.0],   # Aggressive turn through lower atmosphere
             [80.0, 55.0],   # Punch through max Q
             [120.0, 40.0],  # Stratosphere transition
-            [160.0, 25.0],  # Mesosphere/vacuum transition
-            [200.0, 10.0],  # Flattening, keep some loft
-            [240.0, 5.0],   # Near-prograde
-            [300.0, 0.0],   # Level off
+            [140.0, 25.0],  # Final moments before MECO
         ]
     )
     # Upper-stage pitch schedule (time from upper ignition, deg from horizontal)
@@ -118,6 +114,7 @@ class Config:
     throttle_guidance_function_class: str = "custom_guidance.TwoPhaseUpperThrottle"
     
     # Booster: Liftoff 100%, Dip for Max Q, Back to 100%
+    # Realistic duration is ~145s.
     booster_throttle_program: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 1.0],    # ALL ENGINES GO
@@ -125,7 +122,7 @@ class Config:
             [60.0, 0.65],  # THROTTLE BUCKET: Reduce to 65% to save structure
             [75.0, 0.65],  # Hold bucket
             [85.0, 1.0],   # Max Q passed, power up
-            [200.0, 1.0],  # Burn to depletion/MECO
+            [150.0, 1.0],  # Burn to depletion/MECO
         ]
     )
     

@@ -5,97 +5,72 @@ def create_pitch_program_callable(pitch_points: List[Tuple[float, float]], azimu
     """
     Creates a callable pitch program function for the Guidance class.
     
+    This function takes a pitch schedule and an azimuth and returns a callable
+    that can be used by the simulation's guidance system.
+
     Parameters
     ----------
     pitch_points : List[Tuple[float, float]]
         A list of (time_s, pitch_angle_deg) tuples defining the pitch profile.
-        pitch_angle_deg is in degrees relative to the vertical (90 deg is straight up, 0 deg is horizontal).
-        Points are assumed to be sorted by time.
+        Angle is degrees from the local horizontal plane (0 deg is horizontal, 90 deg is vertical).
+        Points are assumed to be sorted by time for interpolation.
+    azimuth_deg : Optional[float]
+        The launch azimuth in degrees from East towards North. Defaults to 0 (due East).
 
     Returns
     -------
     Callable[[float, object], np.ndarray]
         A function suitable for sim.guidance.pitch_program that returns
-        the desired thrust direction vector in ECI.
+        the desired thrust direction vector in ECI frame.
     """
     
     times = np.array([p[0] for p in pitch_points], dtype=float)
     angles_deg = np.array([p[1] for p in pitch_points], dtype=float)
+    azimuth_rad = np.radians(azimuth_deg if azimuth_deg is not None else 0.0)
 
     def pitch_program_function(t: float, state: object) -> np.ndarray:
         """
         Calculates the desired thrust direction based on the parameterized pitch profile.
         """
         # Interpolate the desired pitch angle at the current time
-        desired_pitch_deg = np.interp(t, times, angles_deg, left=angles_deg[0], right=angles_deg[-1])
+        pitch_rad = np.radians(np.interp(t, times, angles_deg, left=angles_deg[0], right=angles_deg[-1]))
         
-        # Convert pitch angle to radians
-        desired_pitch_rad = np.radians(desired_pitch_deg)
-        
-        # Get current position vector from state
-        r_eci = np.asarray(state.r_eci, dtype=float)
+        # Get current position vector and define local coordinate frame
+        r_eci = np.asarray(getattr(state, 'r_eci', [0,0,1]), dtype=float)
         r_norm = np.linalg.norm(r_eci)
         
-        if r_norm == 0.0: # Should not happen in flight, but for robustness
+        if r_norm < 1e-6: # Robustness for r_eci=[0,0,0]
             return np.array([0.0, 0.0, 1.0])
         
-        # Get the 'vertical' direction (away from Earth center)
-        vertical_dir = r_eci / r_norm
+        # Establish the East-North-Up (ENU) local coordinate frame
+        up_dir = r_eci / r_norm
         
-        # The desired thrust vector should be in the plane defined by
-        # the velocity vector and the vertical vector, and tilted
-        # by desired_pitch_rad from vertical.
-        # This is a simplification; a full 3D pitch program is more complex.
-        # For a 2D ascent, assuming motion primarily in the x-z plane (or y-z plane)
-        # we can define a tangent_dir (horizontal) orthogonal to vertical_dir in the plane of motion.
-        
-        # For simplicity, let's assume the pitch angle is defined relative to the current
-        # 'forward' direction, which is often approximated by the velocity vector,
-        # or more precisely by the component of velocity tangential to the sphere.
-        # However, the prompt specifies "relative to the vertical".
-        # Let's derive a simple thrust vector from vertical.
-        
-        # For now, let's assume the velocity vector defines the plane of motion.
-        # A more robust solution would account for yaw.
-        
-        v_eci = np.asarray(state.v_eci, dtype=float)
-        v_norm = np.linalg.norm(v_eci)
-        
-        if v_norm < 1.0: # If almost stationary, just go vertical
-             return vertical_dir
-        
-        # Tangential direction: use azimuth if provided; otherwise use velocity projection.
-        if azimuth_deg is not None:
-            east = np.cross(np.array([0.0, 0.0, 1.0]), vertical_dir)
-            if np.linalg.norm(east) == 0.0:
-                east = np.array([1.0, 0.0, 0.0])
-            east = east / np.linalg.norm(east)
-            north = np.cross(vertical_dir, east)
-            north = north / np.linalg.norm(north)
-            az = np.radians(azimuth_deg)
-            tangent_dir = np.cos(az) * east + np.sin(az) * north
+        # Define a stable 'East' vector, avoiding gimbal lock at the poles
+        z_axis = np.array([0.0, 0.0, 1.0])
+        east_dir = np.cross(z_axis, up_dir)
+        east_norm = np.linalg.norm(east_dir)
+        if east_norm < 1e-9: # True if r_eci is aligned with z_axis (at a pole)
+            # If at a pole, 'East' can be arbitrarily chosen in the xy-plane.
+            east_dir = np.array([1.0, 0.0, 0.0])
         else:
-            # Calculate horizontal direction in the plane defined by r_eci and v_eci
-            horizontal_dir_raw = v_eci - np.dot(v_eci, vertical_dir) * vertical_dir
-            horizontal_norm = np.linalg.norm(horizontal_dir_raw)
-            if horizontal_norm < 1e-6:
-                if vertical_dir[2] < 0.9:
-                     tangent_dir = np.array([0.0, 0.0, 1.0]) - np.dot(np.array([0.0, 0.0, 1.0]), vertical_dir) * vertical_dir
-                else:
-                     tangent_dir = np.array([1.0, 0.0, 0.0]) - np.dot(np.array([1.0, 0.0, 0.0]), vertical_dir) * vertical_dir
-                tangent_dir = tangent_dir / np.linalg.norm(tangent_dir)
-            else:
-                tangent_dir = horizontal_dir_raw / horizontal_norm
+            east_dir /= east_norm
             
-        # The thrust vector is a linear combination of vertical_dir and tangent_dir
-        # desired_pitch_rad is the angle from vertical_dir towards tangent_dir
+        north_dir = np.cross(up_dir, east_dir)
         
-        # For a pitch angle (alpha) from vertical, the vector is:
-        # T = cos(alpha) * vertical_dir + sin(alpha) * tangent_dir
+        # Determine the horizontal direction based on azimuth
+        # Azimuth is angle from East towards North
+        horizontal_dir = np.cos(azimuth_rad) * east_dir + np.sin(azimuth_rad) * north_dir
         
-        thrust_dir_eci = np.sin(desired_pitch_rad) * vertical_dir + np.cos(desired_pitch_rad) * tangent_dir
+        # The final thrust vector is a combination of the horizontal and vertical directions
+        # based on the interpolated pitch angle.
+        thrust_dir = np.cos(pitch_rad) * horizontal_dir + np.sin(pitch_rad) * up_dir
         
-        return thrust_dir_eci
+        # Normalize for safety, though it should be a unit vector by construction
+        thrust_norm = np.linalg.norm(thrust_dir)
+        if thrust_norm < 1e-9:
+            return up_dir # Fallback to vertical thrust
+            
+        return thrust_dir / thrust_norm
 
     return pitch_program_function
 
