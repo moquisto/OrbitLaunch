@@ -15,8 +15,7 @@ import numpy as np
 
 from aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
 from atmosphere import AtmosphereModel
-from custom_guidance import orbital_elements_from_state
-from gravity import EarthModel
+from gravity import EarthModel, orbital_elements_from_state
 from integrators import RK4, VelocityVerlet, State
 from rocket import Engine, Rocket, Stage
 from simulation import Guidance, Simulation

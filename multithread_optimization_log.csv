@@ -1,1 +1,3 @@
 meco_mach,pitch_start_m,pitch_end_m,pitch_blend,final_cost,fuel_used_kg,orbit_error_m,status
+7.3012,8752.9,120625.8,0.463,15000000000.00,0.00,1000000000.00,SIM_FAIL
+7.8659,1745.7,113739.7,1.158,15000000000.00,0.00,1000000000.00,SIM_FAIL

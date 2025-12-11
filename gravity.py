@@ -6,6 +6,7 @@ Implementations are left to be filled in later.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 import numpy as np
 
@@ -74,6 +75,71 @@ class EarthModel:
         # For a rigidly rotating planet, the atmosphere velocity in ECI is
         # given by v_atm = omega x r.
         return np.cross(omega, r)
+
+
+def orbital_elements_from_state(r_vec: np.ndarray, v_vec: np.ndarray, mu: float) -> Tuple[float | None, float | None, float | None]:
+    """
+    Calculates orbital elements (semi-major axis, perigee radius, apoapsis radius)
+    from position and velocity vectors.
+
+    Parameters
+    ----------
+    r_vec : np.ndarray
+        Position vector (m).
+    v_vec : np.ndarray
+        Velocity vector (m/s).
+    mu : float
+        Gravitational parameter of the central body (m^3/s^2).
+
+    Returns
+    -------
+    Tuple[float | None, float | None, float | None]
+        (semi_major_axis, perigee_radius, apoapsis_radius) in meters.
+        Returns None for elements if the orbit is hyperbolic or parabolic,
+        or if calculations yield non-physical results.
+    """
+    r_norm = np.linalg.norm(r_vec)
+    v_norm = np.linalg.norm(v_vec)
+
+    # Specific orbital energy
+    epsilon = (v_norm**2 / 2.0) - (mu / r_norm)
+
+    # Semi-major axis
+    if epsilon == 0:  # Parabolic orbit
+        a = np.inf
+    elif epsilon > 0:  # Hyperbolic orbit
+        a = -mu / (2 * epsilon)
+    else:  # Elliptical orbit
+        a = -mu / (2 * epsilon)
+
+    # Specific angular momentum vector
+    h_vec = np.cross(r_vec, v_vec)
+    h_norm = np.linalg.norm(h_vec)
+
+    if h_norm == 0:  # Radial trajectory
+        return a, None, None
+
+    # Eccentricity vector
+    e_vec = (np.cross(v_vec, h_vec) / mu) - (r_vec / r_norm)
+    e = np.linalg.norm(e_vec)
+
+    rp, ra = None, None
+    if e < 1:  # Elliptical orbit
+        rp = a * (1 - e)
+        ra = a * (1 + e)
+    elif e == 1:  # Parabolic orbit
+        rp = h_norm**2 / mu / 2.0
+        ra = np.inf
+    else:  # Hyperbolic orbit
+        # For hyperbolic, apocenter is at infinity. Pericenter distance is meaningful.
+        rp = h_norm**2 / (mu * (1 + e))
+        ra = np.inf # Effectively infinite for hyperbolic
+
+    # Handle cases where calculation might result in non-physical or undefined elements
+    if np.isinf(a) or np.isnan(a) or (rp is not None and rp < 0) or (ra is not None and ra < 0):
+        return None, None, None # Indicate non-orbital or invalid state
+
+    return a, rp, ra
 
 
 # Nominal constants for convenience (can be used by a real implementation)

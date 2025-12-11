@@ -355,9 +355,13 @@ class Simulation:
             # 3. STAGE SEPARATION:
             # Check the rocket model to see if a stage separation event should occur.
             # This is the primary event that changes the simulation's stage_index.
-            if self.rocket.stage_separation(t_sim, state):
+            if (
+                self.rocket.separation_time_planned is not None
+                and t_sim >= self.rocket.separation_time_planned
+                and getattr(state, "stage_index", 0) == 0  # Only separate if currently stage 0
+            ):
                 stage_idx = getattr(state, "stage_index", 0)
-                if stage_idx < len(self.rocket.stages) - 1:
+                if stage_idx == 0:  # Ensure we are indeed in stage 0
                     # Perform the staging event:
                     # 1. Subtract remaining prop plus dry mass of the jettisoned stage.
                     remaining_prop = self.rocket.stage_prop_remaining[stage_idx]
@@ -367,13 +371,14 @@ class Simulation:
                     # 2. Advance the stage index for the next iteration.
                     state.stage_index = min(stage_idx + 1, len(self.rocket.stages) - 1)
                     # 3. Update the rocket's internal timeline for upper stage ignition.
-                    if self.rocket.stage_engine_off_complete_time[stage_idx] is None:
-                        self.rocket.stage_engine_off_complete_time[stage_idx] = t_sim
-                    # If an ignition time was already scheduled (e.g., via MECO timeline),
-                    # preserve it; otherwise start counting from separation plus the ignition delay.
+                    # This should already be set by MECO, but as a safeguard.
                     if self.rocket.upper_ignition_start_time is None:
-                        self.rocket.upper_ignition_start_time = t_sim + self.rocket.upper_ignition_delay
+                        self.rocket.upper_ignition_start_time = self.rocket.separation_time_planned + self.rocket.upper_ignition_delay
+                    # Also set it on the state so throttle controllers can use it
                     state.upper_ignition_start_time = self.rocket.upper_ignition_start_time
+                    # Mark separation as "done" so it doesn't re-trigger
+                    self.rocket.separation_time_planned = None
+
 
             t_sim += dt
             t_env += dt

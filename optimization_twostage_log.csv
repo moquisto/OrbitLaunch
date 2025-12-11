@@ -1,10 +1,1 @@
-phase,iteration,meco_mach,pitch_start_m,pitch_end_m,pitch_blend,coast_s,upper_burn_s,cost,fuel_used_kg,orbit_error_m,status
-Phase 1,1,6.0000,500.0,80000.0,0.850,120.0,180.0,10079115.73,4158186.05,10079115.73,CRASH
-Phase 1,2,6.3000,500.0,80000.0,0.850,120.0,180.0,10076007.32,4170438.06,10076007.32,CRASH
-Phase 1,3,6.0000,525.0,80000.0,0.850,120.0,180.0,10079084.45,4158322.92,10079084.45,CRASH
-Phase 1,4,6.0000,500.0,84000.0,0.850,120.0,180.0,10072440.35,4201120.20,10072440.35,CRASH
-Phase 1,5,6.0000,500.0,80000.0,0.892,120.0,180.0,10074870.86,4174641.27,10074870.86,CRASH
-Phase 1,1,6.0000,500.0,80000.0,0.850,120.0,180.0,10079115.73,4158186.05,10079115.73,CRASH
-Phase 1,2,6.3000,500.0,80000.0,0.850,120.0,180.0,10076007.32,4170438.06,10076007.32,CRASH
-Phase 1,3,6.0000,525.0,80000.0,0.850,120.0,180.0,10079084.45,4158322.92,10079084.45,CRASH
-Phase 1,4,6.0000,500.0,84000.0,0.850,120.0,180.0,10072440.35,4201120.20,10072440.35,CRASH
+phase,iteration,meco_mach,pitch_time_0,pitch_angle_0,pitch_time_1,pitch_angle_1,pitch_time_2,pitch_angle_2,pitch_time_3,pitch_angle_3,pitch_time_4,pitch_angle_4,coast_s,upper_burn_s,upper_throttle_level_0,upper_throttle_level_1,upper_throttle_level_2,upper_throttle_level_3,upper_throttle_switch_ratio_0,upper_throttle_switch_ratio_1,upper_throttle_switch_ratio_2,booster_throttle_level_0,booster_throttle_level_1,booster_throttle_level_2,booster_throttle_level_3,booster_throttle_switch_ratio_0,booster_throttle_switch_ratio_1,booster_throttle_switch_ratio_2,cost,fuel_used_kg,orbit_error_m,status
