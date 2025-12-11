@@ -72,10 +72,10 @@ def log_iteration(phase, iteration, params, results):
             f"{upper_throttle_switch_ratio_0:.2f}", f"{upper_throttle_switch_ratio_1:.2f}", f"{upper_throttle_switch_ratio_2:.2f}",
             f"{booster_throttle_level_0:.2f}", f"{booster_throttle_level_1:.2f}", f"{booster_throttle_level_2:.2f}", f"{booster_throttle_level_3:.2f}",
             f"{booster_throttle_switch_ratio_0:.2f}", f"{booster_throttle_switch_ratio_1:.2f}", f"{booster_throttle_switch_ratio_2:.2f}",
-            f"{results['cost']:.2f}",
-            f"{results['fuel']:.2f}",
-            f"{results['orbit_error']:.2f}", # Changed "error" to "orbit_error" for clarity and consistency
-            results['status']
+            f"{results.get('cost', 0.0):.2f}",
+            f"{results.get('fuel', 0.0):.2f}",
+            f"{results.get('orbit_error', results.get('error', 0.0)):.2f}",
+            results.get('status', 'UNKNOWN')
         ])
 
 
@@ -258,6 +258,9 @@ def run_simulation_wrapper(scaled_params):
         results["status"] = "SIM_FAIL_INDEX"
     except Exception:
         results["status"] = "SIM_FAIL_UNKNOWN"
+    finally:
+        # Ensure both keys exist for downstream logging
+        results["orbit_error"] = results.get("orbit_error", results.get("error", PENALTY_CRASH))
 
     return results
 
