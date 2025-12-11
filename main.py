@@ -165,7 +165,7 @@ def build_rocket() -> Rocket:
         min_throttle=CFG.engine_min_throttle,
         shutdown_ramp_time=CFG.engine_shutdown_ramp_s,
         throttle_shape_full_threshold=CFG.throttle_full_shape_threshold,
-        mach_ref_speed=CFG.mach_reference_speed,
+
         booster_throttle_program=booster_program_cfg,
     )
 

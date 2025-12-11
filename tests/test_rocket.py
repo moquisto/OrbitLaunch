@@ -150,14 +150,18 @@ def test_rocket_booster_meco_mach_trigger(default_rocket, mock_state):
     CFG.meco_mach = meco_mach_val
     default_rocket.meco_mach = meco_mach_val
     
+    # Determine local speed of sound at test altitude (sea level for mock_state)
+    altitude_for_test = np.linalg.norm(mock_state.r_eci) - default_rocket.earth_radius
+    local_speed_of_sound = CFG.get_speed_of_sound(altitude_for_test)
+
     # Simulate current state with Mach < meco_mach
-    mock_state.v_eci = np.array([0, 0, (meco_mach_val - 0.5) * CFG.mach_reference_speed])
+    mock_state.v_eci = np.array([0, 0, (meco_mach_val - 0.5) * local_speed_of_sound])
     control = {"t": 10.0, "throttle": 1.0, "thrust_dir_eci": np.array([0, 0, 1])}
     default_rocket.thrust_and_mass_flow(control, mock_state, CFG.P_SL)
     assert default_rocket.meco_time is None
 
     # Simulate current state with Mach >= meco_mach
-    mock_state.v_eci = np.array([0, 0, (meco_mach_val + 0.1) * CFG.mach_reference_speed])
+    mock_state.v_eci = np.array([0, 0, (meco_mach_val + 0.1) * local_speed_of_sound])
     control = {"t": 11.0, "throttle": 1.0, "thrust_dir_eci": np.array([0, 0, 1])}
     thrust_vec, dm_dt = default_rocket.thrust_and_mass_flow(control, mock_state, CFG.P_SL)
     
@@ -167,7 +171,7 @@ def test_rocket_booster_meco_mach_trigger(default_rocket, mock_state):
     assert dm_dt == pytest.approx(0.0)
 
     # Even if Mach goes down, MECO time should be preserved and thrust remain 0
-    mock_state.v_eci = np.array([0, 0, (meco_mach_val - 1.0) * CFG.mach_reference_speed])
+    mock_state.v_eci = np.array([0, 0, (meco_mach_val - 1.0) * local_speed_of_sound])
     control = {"t": 12.0, "throttle": 1.0, "thrust_dir_eci": np.array([0, 0, 1])}
     thrust_vec, dm_dt = default_rocket.thrust_and_mass_flow(control, mock_state, CFG.P_SL)
     assert np.linalg.norm(thrust_vec) == pytest.approx(0.0, abs=1e-6)

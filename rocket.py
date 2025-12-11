@@ -132,7 +132,7 @@ class Rocket:
         min_throttle: float = 0.0,
         shutdown_ramp_time: float = 1.0,
         throttle_shape_full_threshold: float = 0.99,
-        mach_ref_speed: float | None = None,
+
         booster_throttle_program: Optional[Any] = None, # Changed type hint to Any for now
     ):
         if len(stages) < 2:
@@ -149,7 +149,7 @@ class Rocket:
         self.min_throttle = float(np.clip(min_throttle, 0.0, 1.0))
         self.shutdown_ramp_time = float(max(shutdown_ramp_time, 0.0))
         self.throttle_shape_full_threshold = float(np.clip(throttle_shape_full_threshold, 0.0, 1.0))
-        self.mach_ref_speed = float(mach_ref_speed) if mach_ref_speed is not None else CFG.mach_reference_speed
+
         self.booster_throttle_program = booster_throttle_program # Store the program
 
         # Internal state for event timing
@@ -247,7 +247,11 @@ class Rocket:
         # Determine an approximate Mach number based on inertial speed.
         v_vec = np.asarray(v_override, dtype=float) if v_override is not None else np.asarray(state.v_eci, dtype=float)
         speed = float(speed_override) if speed_override is not None else float(np.linalg.norm(v_vec))
-        mach = speed / self.mach_ref_speed if self.mach_ref_speed > 0.0 else 0.0
+
+        # Calculate current altitude for dynamic speed of sound
+        altitude = np.linalg.norm(state.r_eci) - self.earth_radius
+        local_speed_of_sound = CFG.get_speed_of_sound(altitude)
+        mach = speed / local_speed_of_sound if local_speed_of_sound > 0.0 else 0.0
 
         stage_idx = self.current_stage_index(state)
         stage = self.stages[stage_idx]
