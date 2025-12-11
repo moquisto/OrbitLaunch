@@ -7,7 +7,7 @@ Implementations are placeholders.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any
 
 import numpy as np
 from gravity import R_EARTH
@@ -231,6 +231,8 @@ class Rocket:
             dir_is_unit = bool(control.get("dir_is_unit", False))
             speed_override = control.get("speed", None)
             v_override = control.get("velocity_vec", None)
+            air_speed_override = control.get("air_speed", None)
+            air_v_override = control.get("air_velocity_vec", None)
         else:
             t = float(getattr(control, "t", 0.0))
             throttle_cmd = float(getattr(control, "throttle", 1.0))
@@ -238,6 +240,8 @@ class Rocket:
             dir_is_unit = bool(getattr(control, "dir_is_unit", False))
             speed_override = getattr(control, "speed", None)
             v_override = getattr(control, "velocity_vec", None)
+            air_speed_override = getattr(control, "air_speed", None)
+            air_v_override = getattr(control, "air_velocity_vec", None)
 
         # Estimate local time step based on the last call (for propellant bookkeeping)
         prev_t = self._last_time
@@ -251,7 +255,9 @@ class Rocket:
         # Calculate current altitude for dynamic speed of sound
         altitude = np.linalg.norm(state.r_eci) - self.earth_radius
         local_speed_of_sound = CFG.get_speed_of_sound(altitude)
-        mach = speed / local_speed_of_sound if local_speed_of_sound > 0.0 else 0.0
+        mach_vec = np.asarray(air_v_override, dtype=float) if air_v_override is not None else v_vec
+        mach_speed = float(air_speed_override) if air_speed_override is not None else float(np.linalg.norm(mach_vec))
+        mach = mach_speed / local_speed_of_sound if local_speed_of_sound > 0.0 else 0.0
 
         stage_idx = self.current_stage_index(state)
         stage = self.stages[stage_idx]

@@ -37,11 +37,27 @@ class Guidance:
     ):
         self.pitch_program = pitch_program
         self.throttle_schedule = throttle_schedule
+        self._stage_start_time = 0.0
+        self._last_stage_index = None
 
     def compute_command(self, t: float, state: State) -> ControlCommand:
+        stage_idx = int(getattr(state, "stage_index", 0))
+        if self._last_stage_index is None:
+            self._stage_start_time = t
+        elif stage_idx != self._last_stage_index:
+            self._stage_start_time = t
+        self._last_stage_index = stage_idx
+        t_stage = t - self._stage_start_time
+
         # Thrust direction: user pitch program or prograde / +z fallback.
         if self.pitch_program is not None:
-            direction = np.asarray(self.pitch_program(t, state), dtype=float)
+            try:
+                direction = np.asarray(
+                    self.pitch_program(t, state, t_stage=t_stage, stage_index=stage_idx),
+                    dtype=float,
+                )
+            except TypeError:
+                direction = np.asarray(self.pitch_program(t, state), dtype=float)
         else:
             v = np.asarray(state.v_eci, dtype=float)
             speed = np.linalg.norm(v)
@@ -160,12 +176,7 @@ class Simulation:
             self._atmo_cache[props_key] = props
         p_amb = float(props.p)
 
-        # Wind cache keyed only on altitude (cheap, deterministic).
-        if altitude in self._wind_cache:
-            wind_vec = self._wind_cache[altitude]
-        else:
-            wind_vec = get_wind_at_altitude(altitude) if CFG.use_jet_stream_model else np.zeros(3)
-            self._wind_cache[altitude] = wind_vec
+        wind_vec = get_wind_at_altitude(altitude, r) if CFG.use_jet_stream_model else np.zeros(3)
 
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
         # Dynamic pressure for limit handling (depends only on v_rel, not thrust)
@@ -188,6 +199,8 @@ class Simulation:
             "dir_is_unit": True,
             "speed": v_norm,
             "velocity_vec": v,
+            "air_speed": v_rel_mag,
+            "air_velocity_vec": v_rel,
         }
         F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(control_payload, state, p_amb)
 

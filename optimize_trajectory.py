@@ -22,7 +22,7 @@ from main import build_simulation, orbital_elements_from_state, MU_EARTH, R_EART
 from config import CFG
 
 # --- Optimization Configuration ---
-TARGET_ALT_M = 200_000.0   # 200 km
+TARGET_ALT_M = 420_000.0   # 420 km
 LAUNCH_LAT = 25.997        # Boca Chica
 LAUNCH_LON = -97.155
 

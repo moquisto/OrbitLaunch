@@ -120,7 +120,8 @@ def test_run_simulation_wrapper_successful_orbit(mock_build_simulation_success):
     mock_build, mock_sim, mock_create_pitch, mock_oe = mock_build_simulation_success
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
-        30.0, 180.0, 10.0, 90.0, # upper_ignition_delay_s, azimuth_deg
+        30.0, 180.0, 10.0, 90.0, # coast_s, upper_burn_s, upper_ignition_delay_s, azimuth_deg
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0, # upper-stage pitch times/angles
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -129,10 +130,11 @@ def test_run_simulation_wrapper_successful_orbit(mock_build_simulation_success):
     mock_build.assert_called_once()
     mock_sim.run.assert_called_once()
     mock_oe.assert_called_once()
-    mock_create_pitch.assert_called_once_with(
-        [(10.0, 80.0), (50.0, 60.0), (100.0, 40.0), (150.0, 20.0), (200.0, 10.0)],
-        azimuth_deg=90.0
-    )
+    assert mock_create_pitch.call_count == 2
+    booster_call = mock_create_pitch.call_args_list[0]
+    upper_call = mock_create_pitch.call_args_list[1]
+    assert booster_call.args[0] == [(10.0, 80.0), (50.0, 60.0), (100.0, 40.0), (150.0, 20.0), (200.0, 10.0)]
+    assert upper_call.args[0] == [(0.0, 10.0), (60.0, 5.0), (180.0, 0.0)]
     
     assert results["fuel"] == pytest.approx(10000.0)
     assert results["status"] == "PERFECT" # Based on precise mock
@@ -145,6 +147,7 @@ def test_run_simulation_wrapper_crash_scenario(mock_build_simulation_crash):
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -175,6 +178,7 @@ def test_run_simulation_wrapper_parameter_clipping(mock_build_simulation_success
         180.0, # upper_burn_s
         10.0, # upper_ignition_delay_s
         90.0, # azimuth_deg
+        50.0, -5.0, 10.0, 100.0, 30.0, -1.0, # upper-stage pitch times/angles (unsorted/invalid)
         -0.1, 1.1, 0.5, 0.5, # upper_throttle_level_x (out of bounds)
         0.8, 0.2, 0.5, # upper_throttle_switch_ratio_x (unsorted, out of bounds)
         0.9, 0.9, 0.9, 0.9,
@@ -184,14 +188,19 @@ def test_run_simulation_wrapper_parameter_clipping(mock_build_simulation_success
     run_simulation_wrapper(scaled_params)
 
     # Assert pitch angles are clipped and times sorted by inspecting mock_create_pitch call
-    mock_create_pitch.assert_called_once()
-    pitch_points_called = mock_create_pitch.call_args[0][0]
+    assert mock_create_pitch.call_count == 2
+    pitch_points_called = mock_create_pitch.call_args_list[0][0][0]
+    upper_points_called = mock_create_pitch.call_args_list[1][0][0]
 
     assert pitch_points_called[0] == (-10.0, 0.0) # time -10.0, angle -10.0 clipped to 0.0
     assert pitch_points_called[1] == (50.0, 40.0)
     assert pitch_points_called[2] == (100.0, 90.0) # time 100.0, angle 100.0 clipped to 90.0
     assert pitch_points_called[3] == (150.0, 20.0)
     assert pitch_points_called[4] == (200.0, 10.0)
+    # Upper stage schedule sorted and clipped
+    assert upper_points_called[0] == (10.0, 90.0)
+    assert upper_points_called[1] == (30.0, 0.0)
+    assert upper_points_called[2] == (50.0, 0.0)
 
     # Throttle schedule should be a ParameterizedThrottleProgram instance
     assert isinstance(mock_sim.guidance.throttle_schedule, ParameterizedThrottleProgram)
@@ -219,6 +228,7 @@ def test_run_simulation_wrapper_sim_fail_index_error(mock_build_simulation_base)
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -235,6 +245,7 @@ def test_run_simulation_wrapper_sim_fail_unknown_exception(mock_build_simulation
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -284,7 +295,7 @@ def mock_globals_for_objectives_and_log():
     """Mocks global variables and log_iteration for isolation."""
     # Patch the global 'bounds' list within the optimization_twostage module
     # for soft_bounds_penalty.
-    with patch('optimization_twostage.bounds', [(-1e6, 1e6)] * 29):
+    with patch('optimization_twostage.bounds', [(-1e6, 1e6)] * 35):
         # Patch log_iteration to prevent file I/O
         with patch('optimization_twostage.log_iteration') as mock_log_iteration:
             # Patch global_iter_count to control its value
@@ -302,6 +313,7 @@ def test_objective_phase1_success(mock_build_simulation_success, mock_globals_fo
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -322,6 +334,7 @@ def test_objective_phase1_crash(mock_build_simulation_crash, mock_globals_for_ob
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -339,6 +352,7 @@ def test_objective_phase2_success(mock_build_simulation_success, mock_globals_fo
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
@@ -358,6 +372,7 @@ def test_objective_phase2_suborbital_with_penalty(mock_build_simulation_suborbit
     scaled_params = [
         6.0, 10.0, 80.0, 50.0, 60.0, 100.0, 40.0, 150.0, 20.0, 200.0, 10.0,
         30.0, 180.0, 10.0, 90.0,
+        0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     

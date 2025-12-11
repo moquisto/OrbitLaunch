@@ -1,15 +1,18 @@
 """
 multithread_optimization.py
 
-Solves the launch-to-orbit problem using a parallel, single-phase optimization
-strategy with Differential Evolution. This approach leverages multiple CPU cores
-to evaluate many candidate trajectories simultaneously, significantly speeding up
-the search for an optimal solution.
+Legacy single-phase optimizer (Differential Evolution). Kept for compatibility
+with tests; the CMA-based optimizer in optimization_twostage.py is the primary
+path. This module mirrors the old API so imports and wrappers continue to work.
 """
+
+from __future__ import annotations
+
 import csv
-import numpy as np
 import time
+import numpy as np
 from scipy.optimize import differential_evolution
+
 from main import build_simulation, orbital_elements_from_state
 from gravity import MU_EARTH, R_EARTH
 from config import CFG
@@ -23,20 +26,21 @@ PENALTY_CRASH = 1e9        # "Soft Wall" for failed orbits
 WEIGHT_FUEL = 1.0          # 1 kg fuel = 1 cost
 WEIGHT_ERROR = 15.0        # 1 m of orbit error = 15 cost. Balances fuel vs accuracy.
 
+
 def run_simulation_wrapper(scaled_params):
     """
-    (This function is identical to the one in optimization_twostage.py)
     Runs the simulation with scaled input parameters and returns a results dictionary.
+
+    Parameters
+    ----------
+    scaled_params : array-like
+        [meco_mach, pitch_start_km, pitch_end_km, pitch_blend_exp]
+        The latter three are retained for API compatibility; current guidance
+        uses the config pitch schedules.
     """
     meco_mach, p_start_km, p_end_km, p_blend = scaled_params
-    p_start_m = p_start_km * 1000.0
-    p_end_m   = p_end_km * 1000.0
 
-    CFG.pitch_guidance_mode = 'function'
     CFG.meco_mach = float(meco_mach)
-    CFG.pitch_turn_start_m = float(p_start_m)
-    CFG.pitch_turn_end_m = float(p_end_m)
-    CFG.pitch_blend_exp = float(p_blend)
     CFG.orbit_alt_tol = 1e6
     CFG.exit_on_orbit = True
 
@@ -46,9 +50,14 @@ def run_simulation_wrapper(scaled_params):
         sim, state0, t0 = build_simulation()
         initial_mass = state0.m
 
-        log = sim.run(t0, duration=2000.0, dt=1.0, state0=state0,
-                      orbit_target_radius=R_EARTH + TARGET_ALT_M,
-                      exit_on_orbit=True)
+        log = sim.run(
+            t0,
+            duration=2000.0,
+            dt=1.0,
+            state0=state0,
+            orbit_target_radius=R_EARTH + TARGET_ALT_M,
+            exit_on_orbit=True,
+        )
 
         results["fuel"] = initial_mass - log.m[-1]
         r, v = log.r[-1], log.v[-1]
@@ -61,14 +70,18 @@ def run_simulation_wrapper(scaled_params):
         target_r = R_EARTH + TARGET_ALT_M
         results["error"] = abs(rp - target_r) + abs(ra - target_r)
 
-        if results["error"] < 5000: results["status"] = "PERFECT"
-        elif results["error"] < 50000: results["status"] = "GOOD"
-        else: results["status"] = "OK"
+        if results["error"] < 5000:
+            results["status"] = "PERFECT"
+        elif results["error"] < 50000:
+            results["status"] = "GOOD"
+        else:
+            results["status"] = "OK"
 
     except (IndexError, Exception):
         results["status"] = "SIM_FAIL"
-        
+
     return results
+
 
 def objective_function(scaled_params):
     """
@@ -76,59 +89,48 @@ def objective_function(scaled_params):
     Calculates a combined cost from fuel usage and orbital error.
     """
     results = run_simulation_wrapper(scaled_params)
-    
-    # The cost is a weighted sum of fuel used and the final orbit error.
-    # This guides the optimizer to find a solution that is both fuel-efficient
-    # and accurate.
     cost = (results["fuel"] * WEIGHT_FUEL) + (results["error"] * WEIGHT_ERROR)
-    
     return cost
+
 
 def run_parallel_optimization():
     """
-    Runs the optimization using Differential Evolution, which distributes
-    the simulation runs across all available CPU cores.
+    Runs the optimization using Differential Evolution, which can distribute
+    simulation runs across CPU cores via scipy's `workers` option.
     """
-    # Bounds are the same as before (min and max for each parameter)
     bounds = [
         (2.0, 9.0),      # MECO Mach
-        (0.5, 10.0),     # Pitch Start (km)
+        (0.5, 10.0),     # Pitch Start (km) - retained for compatibility
         (40.0, 150.0),   # Pitch End (km)
         (0.4, 1.5)       # Pitch Blend Exponent
     ]
 
-    print("="*80)
+    print("=" * 80)
     print("Starting parallel optimization using Differential Evolution.")
-    print("This will use all available CPU cores to speed up the process.")
-    print("="*80)
-    
+    print("=" * 80)
+
     start_time = time.time()
 
-    # --- Run Optimizer ---
-    # differential_evolution is a global optimizer that is great for parallel execution.
-    # `workers=-1` tells it to create a process pool using all available CPUs.
     result = differential_evolution(
         objective_function,
         bounds,
         strategy='best1bin',
-        maxiter=200,          # More iterations as it's a global search
-        popsize=15,           # Population size per generation
+        maxiter=200,
+        popsize=15,
         tol=0.01,
         mutation=(0.5, 1),
         recombination=0.7,
-        disp=True,            # Display progress
-        workers=-1            # THE KEY: Use all available CPU cores
+        disp=True,
+        workers=-1
     )
-    
+
     end_time = time.time()
     print(f"\nOptimization finished in {end_time - start_time:.2f} seconds.")
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("=== OPTIMIZATION COMPLETE ===")
-    
+
     final_params = result.x
-    
-    # Run a final simulation with the best parameters to get definitive results
     final_results = run_simulation_wrapper(final_params)
     final_cost = (final_results["fuel"] * WEIGHT_FUEL) + (final_results["error"] * WEIGHT_ERROR)
 
@@ -137,7 +139,6 @@ def run_parallel_optimization():
     print(f"Final Cost: {final_cost:.2f}")
     print(f"Optimal SCALED Params: {final_params}")
 
-    # Log the final, best result to the CSV file
     with open(LOG_FILENAME, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -151,6 +152,7 @@ def run_parallel_optimization():
             final_results['status']
         ])
     print(f"\nFinal results have been logged to {LOG_FILENAME}")
+
 
 if __name__ == "__main__":
     run_parallel_optimization()

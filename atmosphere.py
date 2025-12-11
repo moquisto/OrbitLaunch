@@ -1,7 +1,4 @@
-"""
-Atmosphere module structure: outlines interfaces for US76, NRLMSIS2.1, and a
-combined dispatcher. Implementations are intentionally left as placeholders.
-"""
+"""Atmosphere model combining US76 and NRLMSIS2.1."""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -89,6 +86,25 @@ class AtmosphereModel:
         if altitude < self.h_switch:
             return self._us76_properties(altitude)
         return self._nrlmsis_properties(altitude, t)
+
+    def get_speed_of_sound(self, altitude: float, t: float | None = None) -> float:
+        """Calculate the local speed of sound.
+
+        Parameters
+        ----------
+        altitude : float
+            Geometric altitude above Earth's mean radius [m].
+        t : float | None
+            Simulation time [s]; may be used by the high-altitude model.
+        """
+        props = self.properties(altitude, t)
+        # Assuming ideal gas: speed_of_sound = sqrt(gamma * R_specific * T)
+        # where R_specific = R_universal / M_mean
+        gamma = 1.4  # Adiabatic index for air
+        R_universal = 8.314462618  # J/(mol*K)
+        M_mean = 0.0289644         # kg/mol, approximate dry-air molar mass
+        R_specific = R_universal / M_mean # J/(kg*K)
+        return np.sqrt(gamma * R_specific * props.T)
 
     def _us76_properties(self, altitude: float) -> AtmosphereProperties:
         """Return properties from a US76-like model.

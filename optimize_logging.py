@@ -15,7 +15,7 @@ from main import build_simulation, orbital_elements_from_state, MU_EARTH, R_EART
 from config import CFG
 
 # --- Configuration ---
-TARGET_ALT_M = 200_000.0   # 200 km
+TARGET_ALT_M = 420_000.0   # 420 km
 LOG_FILENAME = "optimization_log.csv"
 
 # Cost Weights

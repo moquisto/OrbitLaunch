@@ -13,24 +13,54 @@ from atmosphere import AtmosphereModel
 from config import CFG
 
 
-def get_wind_at_altitude(altitude: float) -> np.ndarray:
+def get_wind_at_altitude(altitude: float, r_eci: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Returns a wind vector based on altitude to model the jet stream.
     The wind profile ramps up to a peak speed in the jet stream layer (8-13 km)
-    and is zero outside this band.
+    and is zero outside this band. If a position vector is provided, the wind
+    direction is projected into the local tangent plane so it remains “surface-
+    following” rather than a fixed inertial vector.
     """
     alt_points = np.array(CFG.wind_alt_points)
-    # Wind from the west (positive Y direction in ECI at launch)
-    # reaching a peak of 50 m/s (~112 mph)
     speed_points = np.array(CFG.wind_speed_points)
-    
+
     wind_speed = np.interp(altitude, alt_points, speed_points)
-    
-    direction = np.asarray(CFG.wind_direction_vec, dtype=float)
-    norm = np.linalg.norm(direction)
-    if norm > 0:
-        direction = direction / norm
-    
+
+    if r_eci is not None:
+        r = np.asarray(r_eci, dtype=float)
+        r_norm = np.linalg.norm(r)
+        if r_norm > 0.0:
+            up = r / r_norm
+            east = np.cross([0.0, 0.0, 1.0], up)
+            east_norm = np.linalg.norm(east)
+            if east_norm < 1e-9:
+                east = np.array([1.0, 0.0, 0.0], dtype=float)
+                east_norm = 1.0
+            east /= east_norm
+            north = np.cross(up, east)
+            north_norm = np.linalg.norm(north)
+            if north_norm > 0.0:
+                north /= north_norm
+            else:
+                north = np.array([0.0, 1.0, 0.0], dtype=float)
+
+            dir_local = np.asarray(CFG.wind_direction_vec, dtype=float)
+            dir_surface = dir_local[0] * east + dir_local[1] * north + dir_local[2] * up
+            norm = np.linalg.norm(dir_surface)
+            if norm > 0:
+                direction = dir_surface / norm
+            else:
+                direction = east
+        else:
+            direction = np.zeros(3)
+    else:
+        direction = np.asarray(CFG.wind_direction_vec, dtype=float)
+        norm = np.linalg.norm(direction)
+        if norm > 0:
+            direction = direction / norm
+        else:
+            direction = np.zeros(3)
+
     return direction * wind_speed
 
 
@@ -112,7 +142,7 @@ class Aerodynamics:
         v_atm_rotation = np.asarray(earth.atmosphere_velocity(r), dtype=float)
         
         if CFG.use_jet_stream_model:
-            wind_vector = get_wind_at_altitude(altitude)
+            wind_vector = get_wind_at_altitude(altitude, r)
         else:
             wind_vector = np.array([0.0, 0.0, 0.0])
 

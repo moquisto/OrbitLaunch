@@ -5,6 +5,7 @@ Refined for realistic Starship Block 2/3 parameters (Post-IFT-6 data).
 
 import dataclasses
 from dataclasses import dataclass
+from atmosphere import AtmosphereModel
 
 
 @dataclass
@@ -57,6 +58,7 @@ class Config:
     ref_area_m2: float = 63.62  # A = pi * r^2 = pi * (4.5)^2 ≈ 63.62 m^2
     cd_constant: float = 0.30   # Dropped slightly. Cylinder is high drag, but hypersonic wave drag varies. 0.3 is a safe average.
     engine_min_throttle: float = 0.4  # Raptor deep throttle limit
+    throttle_full_shape_threshold: float = 0.99  # shape value considered "full" for min throttle enforcement
     use_j2: bool = True
     j2_coeff: float = 1.08262668e-3
 
@@ -70,7 +72,6 @@ class Config:
     # Staging Velocity trigger
     # Starship stages earlier than F9. ~1.6 km/s (Mach 5.5).
     meco_mach: float = 5.5
-    mach_reference_speed: float = 343.0  
     separation_altitude_m: float | None = None
 
     # --- Simulation Config ---
@@ -84,21 +85,30 @@ class Config:
 
     # --- Guidance Programs ---
 
-    # Pitch Program (Gravity Turn)
+    # Pitch Program (Gravity Turn) — time-based, separate booster/upper schedules
     # Must maintain positive pitch > 0 until near apogee to reach 420km.
     pitch_guidance_mode: str = "parameterized"
     pitch_guidance_function: str = "custom_guidance.simple_pitch_program"
+    # Booster pitch schedule (time from liftoff, deg from horizontal)
     pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 89.8],       # Vertical clear of tower
-            [800.0, 86.0],     # Initiate kick (start turning)
-            [5000.0, 72.0],    # Aggressive turn in lower atmosphere
-            [12000.0, 55.0],   # punch through Max Q at oblique angle
-            [25000.0, 40.0],   # Stratosphere
-            [50000.0, 25.0],   # Mesosphere/Vacuum transition
-            [90000.0, 10.0],   # Flattening out, but keeping nose UP to gain apogee height
-            [200000.0, 5.0],   # Hold slight positive pitch during coast/insertion
-            [400000.0, 0.0],   # Level off at target altitude
+            [0.0, 89.8],    # Vertical clear of tower
+            [10.0, 86.0],   # Initiate kick early
+            [40.0, 72.0],   # Aggressive turn through lower atmosphere
+            [80.0, 55.0],   # Punch through max Q
+            [120.0, 40.0],  # Stratosphere transition
+            [160.0, 25.0],  # Mesosphere/vacuum transition
+            [200.0, 10.0],  # Flattening, keep some loft
+            [240.0, 5.0],   # Near-prograde
+            [300.0, 0.0],   # Level off
+        ]
+    )
+    # Upper-stage pitch schedule (time from upper ignition, deg from horizontal)
+    upper_pitch_program: list = dataclasses.field(
+        default_factory=lambda: [
+            [0.0, 10.0],   # Gentle initial pitch up to preserve altitude
+            [60.0, 0.0],   # Transition to prograde during upper burn
+            [180.0, 0.0],  # Hold prograde through main upper-stage burn
         ]
     )
     pitch_prograde_speed_threshold: float = 100.0
@@ -183,6 +193,21 @@ class Config:
     log_filename: str = "simulation_log.txt"
     plot_trajectory: bool = True
     animate_trajectory: bool = False
+
+    def __post_init__(self):
+        """Initialize atmosphere model after dataclass init."""
+        self._atmosphere_model: AtmosphereModel = AtmosphereModel(
+            h_switch=self.atmosphere_switch_alt_m,
+            lat_deg=self.launch_lat_deg,
+            lon_deg=self.launch_lon_deg,
+            f107=self.atmosphere_f107,
+            f107a=self.atmosphere_f107a,
+            ap=self.atmosphere_ap,
+        )
+
+    def get_speed_of_sound(self, altitude: float, t: float | None = None) -> float:
+        """Returns the local speed of sound from the atmosphere model."""
+        return self._atmosphere_model.get_speed_of_sound(altitude, t)
 
 CFG = Config()
 

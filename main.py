@@ -22,24 +22,37 @@ from simulation import Guidance, Simulation
 from config import CFG
 from typing import Tuple
 
-class ParameterizedPitchProgram:
+class StageAwarePitchProgram:
     """
-    Interpolates a pitch angle schedule based on altitude.
-    The schedule is defined as a list of [altitude_m, angle_deg] pairs.
-    - Angle is degrees from the local horizontal (0=horizontal, 90=vertical).
-    - Below the first altitude point, the first angle is held.
-    - Above the last altitude point, transitions to prograde guidance.
+    Interpolates pitch angle schedules based on time, separately for booster and upper stage.
+    Schedules are lists of [time_s, angle_deg] pairs, where time is measured from the
+    start of that stage (liftoff for booster, upper ignition for upper stage).
+    Angle is degrees from the local horizontal (0=horizontal, 90=vertical).
+    After the last point, transitions to prograde if speed exceeds the threshold, otherwise holds horizontal.
     """
 
-    def __init__(self, schedule: list[list[float]], prograde_threshold: float, earth_radius: float):
-        # Sort schedule by altitude
-        self.schedule = sorted(schedule, key=lambda p: p[0])
+    def __init__(
+        self,
+        booster_schedule: list[list[float]],
+        upper_schedule: list[list[float]],
+        prograde_threshold: float,
+        earth_radius: float,
+    ):
+        self.booster_time_points, self.booster_angles_rad = self._prep_schedule(booster_schedule)
+        self.upper_time_points, self.upper_angles_rad = self._prep_schedule(upper_schedule)
         self.prograde_threshold = prograde_threshold
         self.earth_radius = earth_radius
-        self.alt_points = np.array([p[0] for p in self.schedule])
-        self.angle_points_rad = np.deg2rad([p[1] for p in self.schedule])
 
-    def __call__(self, t: float, state: State) -> np.ndarray:
+    @staticmethod
+    def _prep_schedule(schedule: list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
+        if not schedule:
+            return np.array([0.0]), np.array([np.pi / 2])
+        sorted_sched = sorted(schedule, key=lambda p: p[0])
+        times = np.array([p[0] for p in sorted_sched], dtype=float)
+        angles = np.deg2rad([p[1] for p in sorted_sched])
+        return times, angles
+
+    def __call__(self, t: float, state: State, t_stage: float | None = None, stage_index: int | None = None) -> np.ndarray:
         r = np.asarray(state.r_eci, dtype=float)
         v = np.asarray(state.v_eci, dtype=float)
         r_norm = np.linalg.norm(r)
@@ -52,20 +65,21 @@ class ParameterizedPitchProgram:
         east_norm = np.linalg.norm(east)
         east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
 
-        alt = r_norm - self.earth_radius
-        final_alt = self.alt_points[-1]
+        idx = 0 if stage_index is None else int(stage_index)
+        time_points = self.booster_time_points if idx == 0 else self.upper_time_points
+        angle_points = self.booster_angles_rad if idx == 0 else self.upper_angles_rad
 
-        if alt > final_alt:
-            # Above pitch program, go prograde if fast enough
+        t_rel = t if t_stage is None else float(t_stage)
+        final_time = time_points[-1]
+
+        if t_rel > final_time:
             speed = np.linalg.norm(v)
             if speed > self.prograde_threshold:
                 direction = v / speed
             else:
-                # If speed is low, point horizontally
                 direction = east
         else:
-            # Interpolate angle from schedule
-            pitch_rad = np.interp(alt, self.alt_points, self.angle_points_rad)
+            pitch_rad = np.interp(t_rel, time_points, angle_points)
             direction = np.cos(pitch_rad) * east + np.sin(pitch_rad) * r_hat
 
         n = np.linalg.norm(direction)
@@ -190,8 +204,9 @@ def build_simulation() -> tuple[Simulation, State, float]:
     aero = Aerodynamics(atmosphere=atmosphere, cd_model=cd_model, reference_area=None)
     # --- Pitch Program Selection ---
     if CFG.pitch_guidance_mode == 'parameterized':
-        pitch_program = ParameterizedPitchProgram(
-            schedule=CFG.pitch_program,
+        pitch_program = StageAwarePitchProgram(
+            booster_schedule=CFG.pitch_program,
+            upper_schedule=getattr(CFG, "upper_pitch_program", CFG.pitch_program),
             prograde_threshold=CFG.pitch_prograde_speed_threshold,
             earth_radius=CFG.earth_radius_m,
         )
