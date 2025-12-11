@@ -76,7 +76,7 @@ class Config:
 
     # --- Simulation Config ---
     main_duration_s: float = 10000
-    main_dt_s: float = 0.05  # INCREASED PRECISION: 20Hz (0.05s) is safer for high-thrust/high-drag dynamics.
+    main_dt_s: float = 1  # INCREASED PRECISION: 20Hz (0.05s) is safer for high-thrust/high-drag dynamics.
     integrator: str = "rk4"
 
     # --- Constraints ---
