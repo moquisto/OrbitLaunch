@@ -1,2 +1,9 @@
 Starting optimization...
 === PHASE 1: TARGETING ORBIT (using Differential Evolution) ===
+[Phase 1] Iteration 1: Best Objective = 5890957.723
+
+Phase 1 Complete. Best Error: 5891.0 km
+Params: [8.49772801e+00 8.41539031e+00 4.61011751e+01 1.45220350e+00
+ 1.08299067e+00 2.88183101e+03 8.52593781e-01 9.41757836e-01
+ 8.14327905e+01 8.92051468e+01]
+Failed to find stable orbit in Phase 1. Stopping.
