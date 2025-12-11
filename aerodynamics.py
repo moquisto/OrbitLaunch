@@ -19,6 +19,9 @@ def get_wind_at_altitude(altitude: float) -> np.ndarray:
     The wind profile ramps up to a peak speed in the jet stream layer (8-13 km)
     and is zero outside this band.
     """
+    if not CFG.use_jet_stream_model:
+        return np.array([0.0, 0.0, 0.0])
+
     alt_points = np.array(CFG.wind_alt_points)
     # Wind from the west (positive Y direction in ECI at launch)
     # reaching a peak of 50 m/s (~112 mph)
