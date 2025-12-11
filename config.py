@@ -194,6 +194,9 @@ class Config:
     plot_trajectory: bool = True
     animate_trajectory: bool = False
 
+    # Optimizer (optional manual seed)
+    optimizer_manual_seed: list | None = None
+
     def __post_init__(self):
         """Initialize atmosphere model after dataclass init."""
         self._atmosphere_model: AtmosphereModel = AtmosphereModel(

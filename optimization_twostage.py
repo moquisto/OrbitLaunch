@@ -32,6 +32,8 @@ TARGET_ALT_M = 420_000.0   # 420 km
 TARGET_TOLERANCE_M = 10000.0
 LOG_FILENAME = "optimization_twostage_log.csv"
 PENALTY_CRASH = 1e9        # "Soft Wall" for failed orbits
+PERIGEE_FLOOR_M = 120_000.0  # Minimum acceptable perigee altitude
+ECC_TOLERANCE = 0.01         # Maximum eccentricity tolerated before penalty
 
 class Counter:
     def __init__(self, initial_value=0):
@@ -410,7 +412,18 @@ def run_simulation_wrapper(scaled_params):
         target_r = R_EARTH + TARGET_ALT_M
         results["error"] = abs(rp - target_r) + abs(ra - target_r)
 
-        if results["error"] < 5000:
+        perigee_alt = rp - R_EARTH
+        ecc = abs((ra - rp) / (ra + rp)) if (ra is not None and rp is not None and (ra + rp) != 0) else None
+        results["perigee_alt_m"] = perigee_alt
+        results["eccentricity"] = ecc
+
+        perigee_penalty = max(0.0, PERIGEE_FLOOR_M - perigee_alt) * 100.0
+        ecc_penalty = max(0.0, (ecc or 0.0) - ECC_TOLERANCE) * target_r
+        results["error"] += perigee_penalty + ecc_penalty
+
+        if perigee_alt < PERIGEE_FLOOR_M:
+            results["status"] = "SUBORBIT"
+        elif results["error"] < 5000:
             results["status"] = "PERFECT"
         elif results["error"] < 50000:
             results["status"] = "GOOD"
@@ -537,7 +550,7 @@ def run_optimization():
     bounds = [
         (4.5, 6.5),      # 0: MECO Mach
         # Pitch profile (5 points, time in seconds, angle in degrees relative to horizontal)
-        (0.0, 20.0),      # 1: pitch_time_0 (s) - Initial liftoff phase
+        (0.0, 20.0),     # 1: pitch_time_0 (s) - Initial liftoff phase
         (80.0, 90.0),     # 2: pitch_angle_0 (deg, 90=vertical)
         (20.0, 60.0),     # 3: pitch_time_1 (s) - Start of gravity turn
         (60.0, 85.0),     # 4: pitch_angle_1 (deg)
@@ -577,10 +590,27 @@ def run_optimization():
         (0.6, 0.95),     # 34: booster_throttle_switch_ratio_2 (0-1, fraction of booster burn duration)
     ]
 
+    def tighten_bounds(bounds_in, seed, margin=0.2):
+        tightened = []
+        for (lo, hi), s in zip(bounds_in, seed):
+            width = hi - lo
+            new_lo = max(lo, s - margin * width)
+            new_hi = min(hi, s + margin * width)
+            if new_lo > new_hi:
+                new_lo, new_hi = lo, hi
+            tightened.append((new_lo, new_hi))
+        return tightened
+
+    # Build start params either from manual seed or config-derived defaults.
+    if CFG.optimizer_manual_seed and len(CFG.optimizer_manual_seed) == 35:
+        start_params = np.array(CFG.optimizer_manual_seed, dtype=float)
+        bounds = tighten_bounds(bounds, start_params, margin=0.2)
+    else:
+        start_params = build_default_params_from_config()
+
     ensure_log_header()
     print(f"=== PHASE 1: TARGETING ORBIT (Logging to {LOG_FILENAME}) ===", flush=True)
     global_iter_count.value = 0
-    start_params = build_default_params_from_config()
     # Ensure seed respects the active bounds to avoid CMA boundary errors.
     lb = np.array([b[0] for b in bounds], dtype=float)
     ub = np.array([b[1] for b in bounds], dtype=float)

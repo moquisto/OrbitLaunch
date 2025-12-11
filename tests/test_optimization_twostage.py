@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import Mock, patch
 
 # Assuming the following imports are needed from the main script
-from optimization_twostage import run_simulation_wrapper, soft_bounds_penalty, objective_phase1, objective_phase2, PENALTY_CRASH, TARGET_TOLERANCE_M, R_EARTH, MU_EARTH, TARGET_ALT_M, Counter
+from optimization_twostage import run_simulation_wrapper, soft_bounds_penalty, objective_phase1, objective_phase2, PENALTY_CRASH, TARGET_TOLERANCE_M, R_EARTH, MU_EARTH, TARGET_ALT_M, Counter, PERIGEE_FLOOR_M, ECC_TOLERANCE
 from config import CFG # For accessing default config values
 from gravity import orbital_elements_from_state # Import directly for patching
 from main import ParameterizedThrottleProgram
@@ -382,11 +382,14 @@ def test_objective_phase2_suborbital_with_penalty(mock_build_simulation_suborbit
     # fuel = 5000.0 (from mock_sim_run_suborbital_result)
     # mock_orbital_elements_suborbital returns rp=R_EARTH-1000, ra=R_EARTH+100_000
     # target_r = R_EARTH + TARGET_ALT_M
-    # error = abs(rp - target_r) + abs(ra - target_r)
-    # This error is > TARGET_TOLERANCE_M so penalty applies.
     target_r = R_EARTH + TARGET_ALT_M
-    error = abs((R_EARTH - 1000) - target_r) + abs((R_EARTH + 100000) - target_r)
-    penalty = (error - TARGET_TOLERANCE_M) * 10.0
+    base_error = abs((R_EARTH - 1000) - target_r) + abs((R_EARTH + 100000) - target_r)
+    perigee_alt = (R_EARTH - 1000) - R_EARTH
+    perigee_penalty = max(0.0, PERIGEE_FLOOR_M - perigee_alt) * 100.0
+    ecc = abs(((R_EARTH + 100000) - (R_EARTH - 1000)) / ((R_EARTH + 100000) + (R_EARTH - 1000)))
+    ecc_penalty = max(0.0, ecc - ECC_TOLERANCE) * target_r
+    error_with_penalties = base_error + perigee_penalty + ecc_penalty
+    penalty = (error_with_penalties - TARGET_TOLERANCE_M) * 10.0
     expected_cost = 5000.0 + penalty
     assert cost == pytest.approx(expected_cost, rel=0.01)
     mock_log_iteration.assert_called_once()

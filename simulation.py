@@ -64,8 +64,13 @@ class Guidance:
             if speed > 0.0:
                 direction = v / speed
             else:
-                # If stationary, push along +z by default.
-                direction = np.array([0.0, 0.0, 1.0], dtype=float)
+                # If stationary, push along local up (radial); fall back to +z only if r is zero.
+                r = np.asarray(state.r_eci, dtype=float)
+                r_norm = np.linalg.norm(r)
+                if r_norm > 0.0:
+                    direction = r / r_norm
+                else:
+                    direction = np.array([0.0, 0.0, 1.0], dtype=float)
 
         norm = np.linalg.norm(direction)
         if norm == 0.0:
