@@ -123,11 +123,11 @@ class SoftwareConfig:
         else:
             raise ValueError(f"Unknown throttle_guidance_mode: '{self.throttle_guidance_mode}'")
 
-    def create_guidance(self, pitch_program, throttle_schedule, booster_throttle_schedule, rocket_stages_info) -> "Guidance":
+    def create_guidance(self, pitch_program, throttle_schedule, booster_throttle_schedule, rocket_stages_info, env_config: EnvironmentConfig) -> "Guidance": # Add env_config
         from Software.guidance import Guidance # Local import
         return Guidance(
             sw_config=self,
-            env_config=EnvironmentConfig(), # Needs a full env_config instance
+            env_config=env_config, # Use the passed env_config instance
             pitch_program=pitch_program,
             upper_throttle_program=throttle_schedule, # This is the upper stage throttle program
             booster_throttle_schedule=booster_throttle_schedule,

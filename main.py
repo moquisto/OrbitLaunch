@@ -12,8 +12,8 @@ from __future__ import annotations
 import datetime as dt
 import importlib
 import numpy as np
-from typing import Tuple
-
+from typing import Tuple, Optional, Any, List # Added List
+from Software.events import EventManager # Add this import
 from Environment.config import EnvironmentConfig
 from Environment.gravity import orbital_elements_from_state
 
@@ -89,6 +89,9 @@ def main_orchestrator(
         env_config=env_config,
     )
 
+    # Event Manager
+    event_manager = EventManager(rocket=rocket) # Instantiate EventManager
+
     # Integrator
     integrator_name = str(getattr(sim_config, "integrator", "rk4")).lower()
     if integrator_name in ("rk4", "runge-kutta", "rk"):
@@ -109,7 +112,8 @@ def main_orchestrator(
         sim_config=sim_config,
         env_config=env_config,
         log_config=log_config,
-        sw_config=sw_config # Pass sw_config to Simulation for potential internal use
+        sw_config=sw_config, # Pass sw_config to Simulation for potential internal use
+        event_manager=event_manager # Pass event_manager to Simulation
     )
 
     # Initial state: surface at launch site, co-rotating atmosphere

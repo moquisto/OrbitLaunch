@@ -254,8 +254,8 @@ def run_simulation_wrapper(params: OptimizationParams, env_config: EnvironmentCo
         coarse_log = sim.run(t0, duration=2000.0, dt=2.0, state0=state0)
         max_altitude_coarse = max(coarse_log.altitude) if coarse_log.altitude else 0.0
         if max_altitude_coarse < 50_000.0:
-            results["status"] = "CRASH"
-            results["error"] = 1e7 + (TARGET_ALT_M - max_altitude_coarse)
+            results["status"] = "CRASH_COARSE"
+            results["error"] = 1e7 + (TARGET_ALT_M - max_altitude_coarse) * 10 # Penalize heavily for low altitude crashes
             return results
 
         log = sim.run(t0, duration=3000.0, dt=1.0, state0=state0)

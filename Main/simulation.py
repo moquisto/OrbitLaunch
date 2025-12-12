@@ -9,11 +9,12 @@ from typing import Callable, Optional, Dict, Any
 
 import numpy as np
 
-from Environment.aerodynamics import Aerodynamics, get_wind_at_altitude # Import get_wind_at_altitude
+from Environment.aerodynamics import Aerodynamics, get_wind_at_altitude
 from Environment.atmosphere import AtmosphereModel
 from Environment.gravity import EarthModel
 from Hardware.rocket import Rocket
 from Software.guidance import Guidance
+from Software.events import EventManager # Import EventManager
 from .integrators import Integrator, RK4
 from .state import State
 from .telemetry import Logger
@@ -41,6 +42,7 @@ class Simulation:
         integrator: Optional[Integrator] = None,
         guidance: Optional[Guidance] = None,
         sw_config: Optional[Any] = None, # Add sw_config
+        event_manager: Optional[EventManager] = None, # Add EventManager
     ):
         self.earth = earth
         self.atmosphere = atmosphere
@@ -51,7 +53,10 @@ class Simulation:
         self.log_config = log_config
         self.sw_config = sw_config # Store sw_config
         self.integrator = integrator or RK4()
-        self.guidance = guidance or Guidance()
+        self.guidance = guidance or Guidance(sw_config=sw_config, env_config=env_config, # Provide default Guidance params if none given
+                                            pitch_program=None, upper_throttle_program=None,
+                                            booster_throttle_schedule=[], rocket_stages_info=[])
+        self.event_manager = event_manager or EventManager(rocket=rocket) # Store EventManager
         
         # Store relevant config values to avoid passing the whole object around
         self.max_q_limit = sim_config.max_q_limit
@@ -218,6 +223,9 @@ class Simulation:
                     current_prop_mass_for_guidance = self._propellant_remaining_current_stage
                     guidance_command = self.guidance.compute_command(tau, s, current_prop_mass_for_guidance, mach_current)
                     
+                    # Apply events based on guidance command BEFORE integration step
+                    s = self.event_manager.apply_events(s, guidance_command)
+
                     t_env_tau = t_env + (tau - t_sim)
                     # Pass the guidance command as control to _rhs
                     rhs_cache[key] = self._rhs(t_env_tau, tau, s, guidance_command)
@@ -275,21 +283,9 @@ class Simulation:
                 break
 
             # --- INTEGRATION & GUIDANCE-DRIVEN EVENTS ---
-            # Get the GuidanceCommand for this step (already computed in rhs_cached for logging)
-            guidance_command = self.guidance.compute_command(t_sim, state, self._propellant_remaining_current_stage, mach_current)
-
-            # Handle stage separation event from Guidance
-            if guidance_command.initiate_stage_separation:
-                if guidance_command.dry_mass_to_drop is None or guidance_command.new_stage_index is None:
-                    raise ValueError("Guidance requested stage separation but did not provide mass to drop or new stage index.")
-                
-                state.m = max(state.m - guidance_command.dry_mass_to_drop, 1e-6)
-                state.stage_index = guidance_command.new_stage_index
-                
-                # Reset propellant tracking for the new stage
-                self._propellant_remaining_current_stage = self.rocket.stages[state.stage_index].prop_mass
-                self._total_dry_mass_remaining -= guidance_command.dry_mass_to_drop
-
+            # Events are now applied inside rhs_cached via EventManager.apply_events
+            # This ensures state updates from events are incorporated before integration step.
+            
             # Integrate the state
             state = self.integrator.step(rhs_cached, state, t_sim, dt)
 
@@ -297,3 +293,4 @@ class Simulation:
             t_env += dt
 
         return logger
+
