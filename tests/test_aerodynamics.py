@@ -32,7 +32,7 @@ def test_drag_force_nonzero(monkeypatch):
     config.use_jet_stream_model = False
     atmo = DummyAtmosphere(rho=1.0, T=300.0, p=0.0)
     earth = DummyEarth(radius=1000.0)
-    aero = Aerodynamics(atmosphere=atmo, cd_model=CdModel(2.0, config), config=config)
+    aero = Aerodynamics(atmosphere=atmo, cd_model=CdModel(2.0, config), env_config=config)
     rocket = DummyRocket()
 
     state = type("S", (), {})()

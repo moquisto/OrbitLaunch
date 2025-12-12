@@ -14,17 +14,13 @@ import importlib
 import numpy as np
 from typing import Tuple
 
-from Environment.aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
-from Environment.atmosphere import AtmosphereModel
-from Environment.gravity import EarthModel, orbital_elements_from_state
 from Environment.config import EnvironmentConfig
+from Environment.gravity import orbital_elements_from_state
 
 from Hardware.rocket import Rocket
-from Hardware.stage import Stage
-from Hardware.engine import Engine
 from Hardware.config import HardwareConfig
 
-from Software.guidance import Guidance, StageAwarePitchProgram, ParameterizedThrottleProgram
+from Software.guidance import Guidance, ParameterizedThrottleProgram
 from Software.config import SoftwareConfig
 
 from Main.integrators import RK4, VelocityVerlet
@@ -36,109 +32,61 @@ from Logging.config import LoggingConfig
 from Analysis.config import AnalysisConfig
 
 # Main orchestrator function (will be implemented next)
-def main_orchestrator():
-    # 1. Instantiate all config objects
-    env_config = EnvironmentConfig()
-    hw_config = HardwareConfig()
-    sw_config = SoftwareConfig()
-    sim_config = SimulationConfig()
-    log_config = LoggingConfig()
-    analysis_config = AnalysisConfig()
+def main_orchestrator(
+    env_config: Optional[EnvironmentConfig] = None,
+    hw_config: Optional[HardwareConfig] = None,
+    sw_config: Optional[SoftwareConfig] = None,
+    sim_config: Optional[SimulationConfig] = None,
+    log_config: Optional[LoggingConfig] = None,
+    analysis_config: Optional[AnalysisConfig] = None,
+    # Optional guidance program instances for optimization
+    pitch_program_instance: Optional[Any] = None,
+    upper_throttle_program_instance: Optional[Any] = None,
+    booster_throttle_schedule_list: Optional[List[List[float]]] = None,
+):
+    # 1. Instantiate all config objects if not provided
+    env_config = env_config or EnvironmentConfig()
+    hw_config = hw_config or HardwareConfig()
+    sw_config = sw_config or SoftwareConfig()
+    sim_config = sim_config or SimulationConfig()
+    log_config = log_config or LoggingConfig()
+    analysis_config = analysis_config or AnalysisConfig()
 
-    # 2. Instantiate core components
+    # 2. Instantiate core components using factory methods from configs
     # Environment
-    earth = EarthModel(
-        mu=env_config.earth_mu,
-        radius=env_config.earth_radius_m,
-        omega_vec=np.array(env_config.earth_omega_vec, dtype=float),
-        j2=env_config.j2_coeff if env_config.use_j2 else None,
-    )
-    atmosphere = AtmosphereModel(env_config)
-    cd_model = CdModel(mach_dependent_cd, env_config)
-    aero = Aerodynamics(
-        atmosphere=atmosphere,
-        cd_model=cd_model,
-        config=env_config, # Passing env_config as config to Aerodynamics.init
-        reference_area=None # Will be determined by rocket stage
-    )
+    earth = env_config.create_earth_model()
+    atmosphere = env_config.create_atmosphere_model()
+    aero = env_config.create_aerodynamics_model(atmosphere=atmosphere)
 
-    # Hardware (Rocket)
-    booster_engine = Engine(
-        thrust_vac=hw_config.booster_thrust_vac,
-        thrust_sl=hw_config.booster_thrust_sl,
-        isp_vac=hw_config.booster_isp_vac,
-        isp_sl=hw_config.booster_isp_sl,
-        p_sl=env_config.P_SL, # From EnvironmentConfig
-    )
-    upper_engine = Engine(
-        thrust_vac=hw_config.upper_thrust_vac,
-        thrust_sl=hw_config.upper_thrust_sl,
-        isp_vac=hw_config.upper_isp_vac,
-        isp_sl=hw_config.upper_isp_sl,
-        p_sl=env_config.P_SL, # From EnvironmentConfig
-    )
+    # Hardware
+    booster_engine = hw_config.create_booster_engine(env_config)
+    upper_engine = hw_config.create_upper_engine(env_config)
 
-    booster_stage = Stage(
-        dry_mass=hw_config.booster_dry_mass,
-        prop_mass=hw_config.booster_prop_mass,
-        engine=booster_engine,
-        ref_area=hw_config.ref_area_m2,
-    )
-    upper_stage = Stage(
-        dry_mass=hw_config.upper_dry_mass,
-        prop_mass=hw_config.upper_prop_mass,
-        engine=upper_engine,
-        ref_area=hw_config.ref_area_m2,
-    )
+    booster_stage = hw_config.create_booster_stage(booster_engine)
+    upper_stage = hw_config.create_upper_stage(upper_engine)
 
     rocket_stages = [booster_stage, upper_stage]
 
     # Software (Guidance)
-    # Pitch Program Selection
-    if sw_config.pitch_guidance_mode == 'parameterized':
-        pitch_program = StageAwarePitchProgram(
-            sw_config=sw_config, # Pass SoftwareConfig
-            env_config=env_config # Pass EnvironmentConfig
-        )
-    elif sw_config.pitch_guidance_mode == 'function':
-        try:
-            module_name, func_name = sw_config.pitch_guidance_function.rsplit('.', 1)
-            module = importlib.import_module(module_name)
-            pitch_program = getattr(module, func_name)
-        except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load pitch guidance function '{sw_config.pitch_guidance_function}': {e}")
-    else:
-        raise ValueError(f"Unknown pitch_guidance_mode: '{sw_config.pitch_guidance_mode}'")
+    # The target_radius and mu are needed for the throttle program if it's function-based.
+    # These are derived from sim_config and env_config.
+    target_orbit_radius = env_config.earth_radius_m + sim_config.target_orbit_alt_m
     
-    # Throttle Controller Selection (for sim.guidance.throttle_schedule)
-    throttle_controller = None
-    if sw_config.throttle_guidance_mode == 'parameterized':
-        # ParameterizedThrottleProgram expects a schedule directly
-        # The main.py will decide which schedule to pass (booster or upper)
-        # Here we only instantiate the upper stage one as per original design.
-        throttle_controller = ParameterizedThrottleProgram(schedule=sw_config.upper_stage_throttle_program)
-    elif sw_config.throttle_guidance_mode == 'function':
-        try:
-            module_name, class_name = sw_config.throttle_guidance_function_class.rsplit('.', 1)
-            module = importlib.import_module(module_name)
-            ControllerClass = getattr(module, class_name)
-            # The original controller class requires target_radius and mu
-            target_radius = env_config.earth_radius_m + sim_config.target_orbit_alt_m
-            throttle_controller = ControllerClass(target_radius=target_radius, mu=env_config.earth_mu)
-        except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load throttle guidance class '{sw_config.throttle_guidance_function_class}': {e}")
-    else:
-        raise ValueError(f"Unknown throttle_guidance_mode: '{sw_config.throttle_guidance_mode}'")
-
-
-    guidance = Guidance(pitch_program=pitch_program, throttle_schedule=throttle_controller)
+    pitch_program = pitch_program_instance or sw_config.create_pitch_program(env_config)
+    throttle_controller = upper_throttle_program_instance or sw_config.create_throttle_program(target_orbit_radius, env_config.earth_mu)
+    
+    guidance = sw_config.create_guidance(
+        pitch_program=pitch_program,
+        throttle_schedule=throttle_controller,
+        booster_throttle_schedule=booster_throttle_schedule_list or sw_config.booster_throttle_program,
+        rocket_stages_info=rocket_stages, # Pass stages info to Guidance
+    )
 
     # Rocket instance
     rocket = Rocket(
         stages=rocket_stages,
         hw_config=hw_config,
         env_config=env_config,
-        booster_throttle_program=ParameterizedThrottleProgram(schedule=sw_config.booster_throttle_program) # Pass booster program
     )
 
     # Integrator
@@ -161,6 +109,7 @@ def main_orchestrator():
         sim_config=sim_config,
         env_config=env_config,
         log_config=log_config,
+        sw_config=sw_config # Pass sw_config to Simulation for potential internal use
     )
 
     # Initial state: surface at launch site, co-rotating atmosphere
@@ -180,34 +129,15 @@ def main_orchestrator():
     return sim, state0, t0, log_config, analysis_config
 
 
-
-
-
-
 def run_simulation_and_get_log(sim: Simulation, state0: State, t_env0: float):
     """Runs the simulation and returns the log."""
     duration = sim.sim_config.main_duration_s
     dt = sim.sim_config.main_dt_s
 
-    # --- Throttle Controller Selection ---
-    orbit_radius = sim.env_config.earth_radius_m + sim.sim_config.target_orbit_alt_m
-    if sim.sw_config.throttle_guidance_mode == 'parameterized':
-        # ParameterizedThrottleProgram expects a schedule directly
-        # The main.py will decide which schedule to pass (booster or upper)
-        throttle_controller = ParameterizedThrottleProgram(schedule=sim.sw_config.upper_stage_throttle_program)
-    elif sim.sw_config.throttle_guidance_mode == 'function':
-        try:
-            module_name, class_name = sim.sw_config.throttle_guidance_function_class.rsplit('.', 1)
-            module = importlib.import_module(module_name)
-            ControllerClass = getattr(module, class_name)
-            # The original controller class requires target_radius and mu
-            throttle_controller = ControllerClass(target_radius=orbit_radius, mu=sim.env_config.earth_mu)
-        except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Could not load throttle guidance class '{sim.sw_config.throttle_guidance_function_class}': {e}")
-    else:
-        raise ValueError(f"Unknown throttle_guidance_mode: '{sim.sw_config.throttle_guidance_mode}'")
+    # The throttle controller is already set up in main_orchestrator
+    # as part of the Guidance object passed to the Simulation.
+    # No need to re-select or re-instantiate here.
 
-    sim.guidance.throttle_schedule = throttle_controller
     log = sim.run(
         t_env0,
         duration,
@@ -217,9 +147,8 @@ def run_simulation_and_get_log(sim: Simulation, state0: State, t_env0: float):
     return log
 
 def main():
-    config = Config()
-    sim, state0, t_env0 = build_simulation(config)
-    log = run_simulation_and_get_log(sim, state0, t_env0, config)
+    sim, state0, t_env0, log_config, analysis_config = main_orchestrator()
+    log = run_simulation_and_get_log(sim, state0, t_env0)
 
 def print_summary(log, sim, log_config, analysis_config):
     """Prints a summary of the simulation results."""

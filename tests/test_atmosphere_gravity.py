@@ -19,8 +19,8 @@ def test_atmosphere_dispatch(monkeypatch):
         return AtmosphereProperties(rho=4.0, p=5.0, T=6.0)
 
     monkeypatch.setattr(AtmosphereModel, "_us76_properties", fake_us76, raising=False)
-        monkeypatch.setattr(AtmosphereModel, "_nrlmsis_properties", fake_msis, raising=False)
-        config = EnvironmentConfig()
+    monkeypatch.setattr(AtmosphereModel, "_nrlmsis_properties", fake_msis, raising=False)
+    config = EnvironmentConfig()
     config.atmosphere_switch_alt_m = 100.0
     model = AtmosphereModel(config)
 

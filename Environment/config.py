@@ -4,7 +4,16 @@ Configuration for the environment models (Earth, Atmosphere, Aerodynamics).
 
 import dataclasses
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, TYPE_CHECKING
+
+import numpy as np
+
+from Environment.gravity import EarthModel
+from Environment.atmosphere import AtmosphereModel
+
+# Use TYPE_CHECKING to avoid circular imports for type hints
+if TYPE_CHECKING:
+    from Environment.aerodynamics import Aerodynamics
 
 
 @dataclass
@@ -53,3 +62,25 @@ class EnvironmentConfig:
             [25.0, 0.20] # High hypersonic/Re-entry
         ]
     )
+
+    def create_earth_model(self) -> EarthModel:
+        return EarthModel(
+            mu=self.earth_mu,
+            radius=self.earth_radius_m,
+            omega_vec=np.array(self.earth_omega_vec, dtype=float),
+            j2=self.j2_coeff if self.use_j2 else None,
+        )
+
+    def create_atmosphere_model(self) -> AtmosphereModel:
+        return AtmosphereModel(self)
+
+    def create_aerodynamics_model(self, atmosphere: AtmosphereModel, reference_area: Optional[float] = None) -> "Aerodynamics":
+        # Local import for construction
+        from Environment.aerodynamics import Aerodynamics, CdModel, mach_dependent_cd
+        cd_model = CdModel(mach_dependent_cd, self)
+        return Aerodynamics(
+            atmosphere=atmosphere,
+            cd_model=cd_model,
+            env_config=self,
+            reference_area=reference_area
+        )

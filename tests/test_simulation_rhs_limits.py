@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import types # Added import for types
 
 from Main.simulation import Simulation, ControlCommand
 from Environment.config import EnvironmentConfig
@@ -8,6 +9,8 @@ from Software.config import SoftwareConfig
 from Main.config import SimulationConfig
 from Logging.config import LoggingConfig
 from Environment.atmosphere import AtmosphereModel
+from Software.guidance import Guidance, StageAwarePitchProgram, ParameterizedThrottleProgram # Import Guidance related classes
+from Hardware.stage import Stage # For dummy rocket_stages_info
 
 
 class DummyProps:
@@ -68,9 +71,28 @@ def test_rhs_scales_thrust_by_max_accel(monkeypatch):
 
     # Mock Rocket
     mock_rocket = types.SimpleNamespace()
-    mock_rocket.thrust_and_mass_flow = lambda control, state, p_amb: (np.array([10.0, 0.0, 0.0]), 0.0)
+    mock_rocket.thrust_and_mass_flow = lambda t, throttle_command, thrust_direction_eci, state, p_amb, current_prop_mass: (np.array([10.0, 0.0, 0.0]), 0.0)
     mock_rocket.env_config = env_config # Needs G0
-    mock_rocket.hw_config = hw_config # Needs engine config for mass flow approx, but not used here
+    mock_rocket.stages = [types.SimpleNamespace(prop_mass=1.0, dry_mass=1.0), types.SimpleNamespace(prop_mass=1.0, dry_mass=1.0)] # Mock stages
+    mock_rocket.hw_config = hw_config # Not directly used in thrust_and_mass_flow mock
+
+    # Dummy Guidance components
+    dummy_pitch_program = StageAwarePitchProgram(sw_config=sw_config, env_config=env_config)
+    dummy_upper_throttle_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
+    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    # Need a basic rocket_stages_info for Guidance
+    dummy_rocket_stages_info = [
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
+    ]
+    dummy_guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=dummy_pitch_program,
+        upper_throttle_program=dummy_upper_throttle_program,
+        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        rocket_stages_info=dummy_rocket_stages_info
+    )
 
     sim = Simulation(
         earth=earth,
@@ -80,6 +102,8 @@ def test_rhs_scales_thrust_by_max_accel(monkeypatch):
         sim_config=sim_config,
         env_config=env_config,
         log_config=log_config,
+        guidance=dummy_guidance,
+        sw_config=sw_config,
     )
 
     state = types.SimpleNamespace()
@@ -117,12 +141,31 @@ def test_rhs_scales_throttle_by_max_q(monkeypatch):
     mock_rocket = types.SimpleNamespace()
     # Intercept the control dict to check throttle
     mock_rocket.last_throttle = None
-    def mock_thrust_and_mass_flow(control, state, p_amb):
-        mock_rocket.last_throttle = control["throttle"]
+    def mock_thrust_and_mass_flow(t, throttle_command, thrust_direction_eci, state, p_amb, current_prop_mass):
+        mock_rocket.last_throttle = throttle_command
         return np.array([1.0, 0.0, 0.0]), 0.0 # Return some thrust, 0 mass flow
     mock_rocket.thrust_and_mass_flow = mock_thrust_and_mass_flow
     mock_rocket.env_config = env_config # Needs G0
+    mock_rocket.stages = [types.SimpleNamespace(prop_mass=1.0, dry_mass=1.0), types.SimpleNamespace(prop_mass=1.0, dry_mass=1.0)] # Mock stages
     mock_rocket.hw_config = hw_config # Not directly used in thrust_and_mass_flow mock
+
+    # Dummy Guidance components
+    dummy_pitch_program = StageAwarePitchProgram(sw_config=sw_config, env_config=env_config)
+    dummy_upper_throttle_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
+    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    # Need a basic rocket_stages_info for Guidance
+    dummy_rocket_stages_info = [
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
+    ]
+    dummy_guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=dummy_pitch_program,
+        upper_throttle_program=dummy_upper_throttle_program,
+        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        rocket_stages_info=dummy_rocket_stages_info
+    )
 
     sim = Simulation(
         earth=earth,
@@ -132,6 +175,8 @@ def test_rhs_scales_throttle_by_max_q(monkeypatch):
         sim_config=sim_config,
         env_config=env_config,
         log_config=log_config,
+        guidance=dummy_guidance,
+        sw_config=sw_config,
     )
 
     state = types.SimpleNamespace()

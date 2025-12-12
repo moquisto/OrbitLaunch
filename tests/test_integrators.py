@@ -1,6 +1,7 @@
 import numpy as np
 
-from integrators import RK4, VelocityVerlet, State
+from Main.integrators import RK4, VelocityVerlet
+from Main.state import State
 
 
 def harmonic_deriv(t, state):

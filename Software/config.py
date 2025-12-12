@@ -5,7 +5,16 @@ Configuration for the software components (guidance, mission profile, events).
 import dataclasses
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+import importlib
+import numpy as np
+from typing import List, Tuple, Optional, TYPE_CHECKING
 
+# from Software.guidance import Guidance # For type hinting
+from Environment.config import EnvironmentConfig
+
+
+if TYPE_CHECKING:
+    from Software.guidance import Guidance
 
 @dataclass
 class SoftwareConfig:
@@ -69,3 +78,58 @@ class SoftwareConfig:
     upper_throttle_vr_tolerance: float = 2.0
     upper_throttle_alt_tolerance: float = 1000.0
     base_throttle_cmd: float = 1.0
+
+    # Engine and Staging Parameters (moved from HardwareConfig / Rocket)
+    main_engine_ramp_time: float = 3.0           # [s] (time for engines to reach full thrust from ignition)
+    upper_engine_ramp_time: float = 1.0          # [s]
+    meco_mach: float = 4.0                       # [Mach] (Mach number at which booster MECO occurs)
+    separation_delay_s: float = 2.0              # [s] (time between booster MECO and stage separation)
+    upper_ignition_delay_s: float = 2.0          # [s] (time between stage separation and upper stage ignition)
+    engine_min_throttle: float = 0.4             # (Raptor deep throttle limit)
+    engine_shutdown_ramp_s: float = 0.5          # [s] (time for engines to ramp down to zero thrust)
+    throttle_full_shape_threshold: float = 0.99  # (shape value considered "full" for min throttle enforcement)
+
+    def create_pitch_program(self, env_config: EnvironmentConfig):
+        from Software.guidance import StageAwarePitchProgram # Local import
+        if self.pitch_guidance_mode == 'parameterized':
+            return StageAwarePitchProgram(
+                sw_config=self,
+                env_config=env_config
+            )
+        elif self.pitch_guidance_mode == 'function':
+            try:
+                module_name, func_name = self.pitch_guidance_function.rsplit('.', 1)
+                module = importlib.import_module(module_name)
+                return getattr(module, func_name)
+            except (ImportError, AttributeError, ValueError) as e:
+                raise ImportError(f"Could not load pitch guidance function '{self.pitch_guidance_function}': {e}")
+        else:
+            raise ValueError(f"Unknown pitch_guidance_mode: '{self.pitch_guidance_mode}'")
+
+    def create_throttle_program(self, target_radius: float, mu: float):
+        from Software.guidance import ParameterizedThrottleProgram # Local import
+        if self.throttle_guidance_mode == 'parameterized':
+            # This returns a ParameterizedThrottleProgram for the upper stage.
+            # The booster throttle program needs to be handled separately where the Rocket is built.
+            return ParameterizedThrottleProgram(schedule=self.upper_stage_throttle_program)
+        elif self.throttle_guidance_mode == 'function':
+            try:
+                module_name, class_name = self.throttle_guidance_function_class.rsplit('.', 1)
+                module = importlib.import_module(module_name)
+                ControllerClass = getattr(module, class_name)
+                return ControllerClass(target_radius=target_radius, mu=mu)
+            except (ImportError, AttributeError, ValueError) as e:
+                raise ImportError(f"Could not load throttle guidance class '{self.throttle_guidance_function_class}': {e}")
+        else:
+            raise ValueError(f"Unknown throttle_guidance_mode: '{self.throttle_guidance_mode}'")
+
+    def create_guidance(self, pitch_program, throttle_schedule, booster_throttle_schedule, rocket_stages_info) -> "Guidance":
+        from Software.guidance import Guidance # Local import
+        return Guidance(
+            sw_config=self,
+            env_config=EnvironmentConfig(), # Needs a full env_config instance
+            pitch_program=pitch_program,
+            upper_throttle_program=throttle_schedule, # This is the upper stage throttle program
+            booster_throttle_schedule=booster_throttle_schedule,
+            rocket_stages_info=rocket_stages_info
+        )

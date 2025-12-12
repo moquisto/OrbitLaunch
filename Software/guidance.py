@@ -1,9 +1,13 @@
 from __future__ import annotations
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional, Any, TYPE_CHECKING
 import numpy as np
 from Main.state import State
-from .config import SoftwareConfig
+# from .config import SoftwareConfig # Removed module-level import
 from Environment.config import EnvironmentConfig
+
+if TYPE_CHECKING:
+    from .config import SoftwareConfig
+
 
 def create_pitch_program_callable(pitch_points: List[Tuple[float, float]], azimuth_deg: Optional[float] = None) -> Callable[[float, object], np.ndarray]:
     """
@@ -108,8 +112,8 @@ class StageAwarePitchProgram:
         return times, angles
 
     def __call__(self, t: float, state: State, t_stage: float | None = None, stage_index: int | None = None) -> np.ndarray:
-        r = np.asarray(state.r_eci, dtype=float)
-        v = np.asarray(state.v_eci, dtype=float)
+        r = np.asarray(getattr(state, "r_eci", [0, 0, 1]), dtype=float)
+        v = np.asarray(getattr(state, "v_eci", [0, 0, 0]), dtype=float)
         r_norm = np.linalg.norm(r)
         if r_norm == 0.0:
             return np.array([0.0, 0.0, 1.0], dtype=float)
@@ -165,3 +169,147 @@ class ParameterizedThrottleProgram:
             time_since_ignition, self.time_points, self.throttle_points, left=0.0, right=0.0
         )
         return float(throttle)
+
+from dataclasses import dataclass
+
+@dataclass
+class GuidanceCommand:
+    throttle: float
+    thrust_direction_eci: np.ndarray  # unit vector in ECI
+    initiate_stage_separation: bool = False
+    new_stage_index: int | None = None
+    dry_mass_to_drop: float | None = None
+
+class Guidance:
+    def __init__(
+        self,
+        sw_config: SoftwareConfig,
+        env_config: EnvironmentConfig,
+        pitch_program: StageAwarePitchProgram,
+        upper_throttle_program: ParameterizedThrottleProgram,
+        booster_throttle_schedule: List[List[float]],
+        rocket_stages_info: List[Any], # Pass rocket stages info for dry masses
+    ):
+        self.sw_config = sw_config
+        self.env_config = env_config
+        self.pitch_program = pitch_program
+        self.upper_throttle_program = upper_throttle_program
+        self.rocket_stages_info = rocket_stages_info
+
+        # Parameters formerly in Rocket for guidance logic
+        self.main_engine_ramp_time = float(sw_config.main_engine_ramp_time)
+        self.upper_engine_ramp_time = float(sw_config.upper_engine_ramp_time)
+        self.meco_mach = float(sw_config.meco_mach)
+        self.separation_delay = float(sw_config.separation_delay_s)
+        self.upper_ignition_delay = float(sw_config.upper_ignition_delay_s)
+        self.min_throttle = float(np.clip(sw_config.engine_min_throttle, 0.0, 1.0))
+        self.shutdown_ramp_time = float(max(sw_config.engine_shutdown_ramp_s, 0.0))
+        self.throttle_full_shape_threshold = float(np.clip(sw_config.throttle_full_shape_threshold, 0.0, 1.0))
+
+        # Booster throttle program (schedule, not an instance)
+        self.booster_throttle_program = ParameterizedThrottleProgram(schedule=booster_throttle_schedule)
+
+        # Internal state for event timing and propellant tracking
+        self.meco_time: float | None = None
+        self.separation_time_planned: float | None = None
+        self.upper_ignition_start_time: float | None = None
+        self.stage_engine_off_complete_time: list[float | None] = [None] * len(rocket_stages_info)
+        self._last_t_sim = 0.0 # Track last time for dt calculations
+
+        self.reset()
+
+    def reset(self):
+        self.meco_time = None
+        self.separation_time_planned = None
+        self.upper_ignition_start_time = None
+        self.stage_engine_off_complete_time = [None] * len(self.rocket_stages_info)
+        self._last_t_sim = 0.0
+
+    def compute_command(self, t_sim: float, state: State, current_prop_mass: float, mach: float) -> GuidanceCommand:
+        throttle = 0.0
+        thrust_direction_eci = np.array([0.0, 0.0, 1.0], dtype=float)
+        initiate_stage_separation = False
+        new_stage_index: int | None = None
+        dry_mass_to_drop: float | None = None
+
+        dt_internal = t_sim - self._last_t_sim
+        self._last_t_sim = t_sim
+
+        current_stage_idx = getattr(state, "stage_index", 0)
+        
+        # --- Determine Throttle Command ---
+        shape = 0.0
+        if current_stage_idx == 0: # Booster stage
+            # If MECO has occurred or fuel is empty, engine should be off or ramping down
+            if self.meco_time is not None and t_sim >= self.meco_time:
+                shape = 0.0
+            elif current_prop_mass <= 0.0: # Fuel empty, ramp down
+                ramp_end = (self.stage_engine_off_complete_time[0] or t_sim) + self.shutdown_ramp_time
+                if t_sim < ramp_end:
+                    shape = max(0.0, 1.0 - (t_sim - (self.stage_engine_off_complete_time[0] or t_sim)) / max(self.shutdown_ramp_time, 1e-9))
+                else:
+                    shape = 0.0
+                    if self.stage_engine_off_complete_time[0] is None:
+                        self.stage_engine_off_complete_time[0] = t_sim
+            else: # Normal booster operation
+                if t_sim < self.main_engine_ramp_time: # Ramp-up phase from t=0
+                    shape = max(0.0, t_sim / self.main_engine_ramp_time)
+                else: # Use booster throttle program
+                    shape = self.booster_throttle_program(t_sim, state)
+
+            # Detect MECO event by Mach threshold (booster only)
+            if self.meco_time is None and mach >= self.meco_mach:
+                self.meco_time = t_sim
+                # Mark booster engine fully off at MECO and schedule downstream events.
+                if self.stage_engine_off_complete_time[0] is None:
+                    self.stage_engine_off_complete_time[0] = t_sim
+                if self.separation_time_planned is None:
+                    self.separation_time_planned = t_sim + self.separation_delay
+                if self.upper_ignition_start_time is None:
+                    self.upper_ignition_start_time = self.separation_time_planned + self.upper_ignition_delay
+                shape = 0.0 # cut off thrust immediately
+                
+            # Check for stage separation event
+            if (
+                self.separation_time_planned is not None
+                and t_sim >= self.separation_time_planned
+                and current_stage_idx == 0
+            ):
+                initiate_stage_separation = True
+                new_stage_index = 1
+                # The total mass to drop is the dry mass of the booster stage plus any remaining propellant in it
+                dry_mass_to_drop = self.rocket_stages_info[0].dry_mass + current_prop_mass
+                self.separation_time_planned = None # Event consumed
+
+        elif current_stage_idx == 1: # Upper stage
+            if self.upper_ignition_start_time is not None and t_sim >= self.upper_ignition_start_time:
+                t_rel_upper = t_sim - self.upper_ignition_start_time
+                if current_prop_mass <= 0.0: # Fuel empty, ramp down
+                    ramp_end = (self.stage_engine_off_complete_time[1] or t_sim) + self.shutdown_ramp_time
+                    if t_sim < ramp_end:
+                        shape = max(0.0, 1.0 - (t_sim - (self.stage_engine_off_complete_time[1] or t_sim)) / max(self.shutdown_ramp_time, 1e-9))
+                    else:
+                        shape = 0.0
+                        if self.stage_engine_off_complete_time[1] is None:
+                            self.stage_engine_off_complete_time[1] = t_sim
+                else: # Normal upper stage operation
+                    if t_rel_upper < self.upper_engine_ramp_time: # Ramp-up phase
+                        shape = max(0.0, 1.0 - t_rel_upper / self.upper_engine_ramp_time)
+                    else: # Use upper stage throttle program
+                        shape = self.upper_throttle_program(t_sim, state) # Note: upper_throttle_program handles relative time internally
+
+        # Apply throttle limits
+        throttle = np.clip(shape, 0.0, 1.0)
+        if shape >= self.throttle_full_shape_threshold and throttle > 0.0 and self.min_throttle > 0.0:
+            throttle = max(throttle, self.min_throttle)
+
+        # --- Determine Thrust Direction ---
+        thrust_direction_eci = self.pitch_program(t_sim, state, t_stage=t_sim, stage_index=current_stage_idx)
+
+        return GuidanceCommand(
+            throttle=throttle,
+            thrust_direction_eci=thrust_direction_eci,
+            initiate_stage_separation=initiate_stage_separation,
+            new_stage_index=new_stage_index,
+            dry_mass_to_drop=dry_mass_to_drop
+        )

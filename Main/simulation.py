@@ -9,10 +9,11 @@ from typing import Callable, Optional, Dict, Any
 
 import numpy as np
 
-from Environment.aerodynamics import Aerodynamics
+from Environment.aerodynamics import Aerodynamics, get_wind_at_altitude # Import get_wind_at_altitude
 from Environment.atmosphere import AtmosphereModel
 from Environment.gravity import EarthModel
 from Hardware.rocket import Rocket
+from Software.guidance import Guidance
 from .integrators import Integrator, RK4
 from .state import State
 from .telemetry import Logger
@@ -39,6 +40,7 @@ class Simulation:
         log_config: LoggingConfig,
         integrator: Optional[Integrator] = None,
         guidance: Optional[Guidance] = None,
+        sw_config: Optional[Any] = None, # Add sw_config
     ):
         self.earth = earth
         self.atmosphere = atmosphere
@@ -47,6 +49,7 @@ class Simulation:
         self.sim_config = sim_config
         self.env_config = env_config
         self.log_config = log_config
+        self.sw_config = sw_config # Store sw_config
         self.integrator = integrator or RK4()
         self.guidance = guidance or Guidance()
         
@@ -58,6 +61,10 @@ class Simulation:
         self.use_jet_stream_model = env_config.use_jet_stream_model
         self.air_gamma = env_config.air_gamma
         self.air_gas_constant = env_config.air_gas_constant
+
+        # Internal state for propellant tracking
+        self._propellant_remaining_current_stage: float = self.rocket.stages[0].prop_mass
+        self._total_dry_mass_remaining: float = sum(s.dry_mass for s in self.rocket.stages)
 
         # Tiny memoization cache for atmospheric properties (cleared each run)
         self._atmo_cache: dict[tuple[float, float], Any] = {}
@@ -84,32 +91,32 @@ class Simulation:
 
         F_drag = self.aero.drag_force(state, self.earth, t_env, self.rocket)
         
-        # Calculate dynamic pressure 'q' for max-q throttle limiting.
-        # This requires air-relative velocity, which is also calculated inside drag_force.
-        # To avoid changing the drag_force signature, we recalculate it here.
-        # This is a minor inefficiency but keeps the component interface clean.
+        # Calculate dynamic pressure 'q' and Mach number.
         rho = float(props.rho)
-        if rho > 0:
-            v_atm_rotation = self.earth.atmosphere_velocity(r)
-            wind_vector = self.aero._get_wind_at_altitude(altitude, r) if self.use_jet_stream_model else np.zeros(3)
-            v_air = v_atm_rotation + wind_vector
-            v_rel = v - v_air
-            q = 0.5 * rho * np.dot(v_rel, v_rel)
-        else:
-            q = 0.0
+        v_atm_rotation = self.earth.atmosphere_velocity(r)
+        wind_vector = get_wind_at_altitude(altitude, self.env_config, r) if self.env_config.use_jet_stream_model else np.zeros(3)
+        v_air = v_atm_rotation + wind_vector
+        v_rel = v - v_air
+        v_rel_mag = np.linalg.norm(v_rel)
+        q = 0.5 * rho * v_rel_mag**2 if rho > 0 else 0.0
+
+        a_sound = np.sqrt(max(self.air_gamma * self.air_gas_constant * float(props.T), 0.0))
+        mach = v_rel_mag / a_sound if a_sound > 0.0 else 0.0
 
         throttle = control.throttle
         if self.max_q_limit is not None and q > self.max_q_limit and q > 0.0:
             throttle = float(np.clip(throttle * (self.max_q_limit / q), 0.0, 1.0))
 
-        # Thrust + mass flow
-        control_payload = {
-            "t": t_sim,
-            "throttle": throttle,
-            "thrust_dir_eci": control.thrust_direction,
-            "dir_is_unit": True,
-        }
-        F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(control_payload, state, p_amb)
+        # Thrust + mass flow (using refactored rocket method)
+        current_prop_mass = self._propellant_remaining_current_stage
+        F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(
+            t_sim, # Pass current simulation time
+            throttle,
+            control.thrust_direction_eci,
+            state,
+            p_amb,
+            current_prop_mass,
+        )
 
         # Accelerations
         a_drag = F_drag / mass
@@ -175,22 +182,31 @@ class Simulation:
         
         # Ensure the simulation starts with the correct stage index from the initial state.
         state.stage_index = int(getattr(state, "stage_index", 0))
-        
+
+        # Initial propellant state for simulation (based on initial stage)
+        self._propellant_remaining_current_stage = self.rocket.stages[state.stage_index].prop_mass
+        self._total_dry_mass_remaining = sum(s.dry_mass for s in self.rocket.stages)
+
         orbit_coast_end: float | None = None
 
         while t_sim <= t_end_sim:
             # --- Main Simulation Loop ---
 
-            # DEFENSIVE GUARD: Prevent a stale stage_index=1 if the booster still has fuel
-            # and no shutdown/separation timeline has been established.
-            if (
-                getattr(state, "stage_index", 0) > 0
-                and self.rocket.stage_fuel_empty_time[0] is None
-                and self.rocket.stage_prop_remaining[0] > 0
-                and self.rocket.stage_engine_off_complete_time[0] is None
-                and self.rocket.separation_time_planned is None
-            ):
-                state.stage_index = 0
+            # Pre-calculate atmospheric properties and Mach for Guidance
+            r_norm_current = np.linalg.norm(state.r_eci)
+            altitude_current = max(0.0, r_norm_current - float(self.earth.radius))
+            
+            props_current = self.atmosphere.properties(altitude_current, t_env)
+            rho_current = float(props_current.rho)
+
+            v_atm_rotation_current = self.earth.atmosphere_velocity(state.r_eci)
+            wind_vector_current = self.aero._get_wind_at_altitude(altitude_current, state.r_eci) if self.use_jet_stream_model else np.zeros(3)
+            v_air_current = v_atm_rotation_current + wind_vector_current
+            v_rel_current = np.asarray(state.v_eci, dtype=float) - v_air_current
+            v_rel_mag_current = np.linalg.norm(v_rel_current)
+            a_sound_current = np.sqrt(max(self.air_gamma * self.air_gas_constant * float(props_current.T), 0.0))
+            mach_current = v_rel_mag_current / a_sound_current if a_sound_current > 0.0 else 0.0
+
 
             # Cache derivatives/extras so we don't recompute for logging + integrator.
             rhs_cache: dict[tuple[float, int], tuple[np.ndarray, np.ndarray, float, dict]] = {}
@@ -198,9 +214,13 @@ class Simulation:
             def rhs_cached(tau: float, s: State):
                 key = (tau, id(s))
                 if key not in rhs_cache:
-                    control_local = self.guidance.compute_command(tau, s)
+                    # Guidance needs current propellant mass and mach
+                    current_prop_mass_for_guidance = self._propellant_remaining_current_stage
+                    guidance_command = self.guidance.compute_command(tau, s, current_prop_mass_for_guidance, mach_current)
+                    
                     t_env_tau = t_env + (tau - t_sim)
-                    rhs_cache[key] = self._rhs(t_env_tau, tau, s, control_local)
+                    # Pass the guidance command as control to _rhs
+                    rhs_cache[key] = self._rhs(t_env_tau, tau, s, guidance_command)
                 dr_dt, dv_dt, dm_dt, _extras = rhs_cache[key]
                 return dr_dt, dv_dt, dm_dt
 
@@ -208,6 +228,10 @@ class Simulation:
             drdt, dvdt, dmdt = rhs_cached(t_sim, state)
             extras = rhs_cache[(t_sim, id(state))][3]
             logger.record(t_sim, t_env, state, extras)
+
+            # Update propellant remaining for the current stage in Simulation's internal state
+            if dmdt < 0: # dm_dt is negative for mass loss
+                self._propellant_remaining_current_stage = max(0.0, self._propellant_remaining_current_stage + dmdt * dt)
 
             # --- TERMINATION & EVENT CHECKS ---
 
@@ -250,28 +274,24 @@ class Simulation:
                 logger.cutoff_reason = "escape"
                 break
 
-            # --- INTEGRATION & STAGING ---
-            state = self.integrator.step(rhs_cached, state, t_sim, dt)
+            # --- INTEGRATION & GUIDANCE-DRIVEN EVENTS ---
+            # Get the GuidanceCommand for this step (already computed in rhs_cached for logging)
+            guidance_command = self.guidance.compute_command(t_sim, state, self._propellant_remaining_current_stage, mach_current)
 
-            # 3. STAGE SEPARATION
-            if (
-                self.rocket.separation_time_planned is not None
-                and t_sim >= self.rocket.separation_time_planned
-                and getattr(state, "stage_index", 0) == 0
-            ):
-                stage_idx = 0
-                remaining_prop = self.rocket.stage_prop_remaining[stage_idx]
-                dropped_mass = self.rocket.stages[stage_idx].dry_mass + remaining_prop
-                state.m = max(state.m - dropped_mass, 1e-6)
-                self.rocket.stage_prop_remaining[stage_idx] = 0.0
-                state.stage_index = 1
-                if self.rocket.upper_ignition_start_time is None:
-                    self.rocket.upper_ignition_start_time = t_sim + self.rocket.upper_ignition_delay
+            # Handle stage separation event from Guidance
+            if guidance_command.initiate_stage_separation:
+                if guidance_command.dry_mass_to_drop is None or guidance_command.new_stage_index is None:
+                    raise ValueError("Guidance requested stage separation but did not provide mass to drop or new stage index.")
                 
-                # Propagate ignition time to state for other components to see
-                setattr(state, 'upper_ignition_start_time', self.rocket.upper_ignition_start_time)
+                state.m = max(state.m - guidance_command.dry_mass_to_drop, 1e-6)
+                state.stage_index = guidance_command.new_stage_index
                 
-                self.rocket.separation_time_planned = None
+                # Reset propellant tracking for the new stage
+                self._propellant_remaining_current_stage = self.rocket.stages[state.stage_index].prop_mass
+                self._total_dry_mass_remaining -= guidance_command.dry_mass_to_drop
+
+            # Integrate the state
+            state = self.integrator.step(rhs_cached, state, t_sim, dt)
 
             t_sim += dt
             t_env += dt

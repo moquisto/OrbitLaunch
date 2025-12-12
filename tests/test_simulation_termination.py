@@ -1,6 +1,7 @@
 import numpy as np
 import types
 import pytest
+from unittest.mock import Mock # Added import for Mock
 
 from Main.simulation import Simulation, Guidance
 from Main.state import State
@@ -13,7 +14,11 @@ from Logging.config import LoggingConfig
 from Environment.gravity import EarthModel
 from Environment.atmosphere import AtmosphereModel
 from Environment.aerodynamics import Aerodynamics
-from Hardware.rocket import Rocket, Engine, Stage
+from Hardware.rocket import Rocket
+from Hardware.engine import Engine # Corrected import
+from Hardware.stage import Stage # Corrected import
+from Software.guidance import StageAwarePitchProgram, ParameterizedThrottleProgram # Import for dummy guidance components
+from typing import Optional
 
 
 class DummyProps:
@@ -77,6 +82,10 @@ class DummyAero:
     def drag_force(self, state, earth, t_env, rocket):
         return np.zeros(3)
 
+    # Add mock for _get_wind_at_altitude
+    def _get_wind_at_altitude(self, altitude: float, r_eci: Optional[np.ndarray] = None) -> np.ndarray:
+        return np.zeros(3)
+
 
 def build_dummy_rocket(hw_config: HardwareConfig, env_config: EnvironmentConfig) -> Rocket:
     booster_engine = Engine(
@@ -110,7 +119,6 @@ def build_dummy_rocket(hw_config: HardwareConfig, env_config: EnvironmentConfig)
         stages=[booster_stage, upper_stage],
         hw_config=hw_config,
         env_config=env_config,
-        booster_throttle_program=None, # Not relevant for these tests
     )
 
 
@@ -126,8 +134,33 @@ def test_simulation_orbit_exit():
     atmosphere = DummyAtmosphere(env_config)
     aero = DummyAero(atmosphere=atmosphere, env_config=env_config)
     rocket = build_dummy_rocket(hw_config, env_config)
-    integrator = RK4()
-    guidance = Guidance()
+    # Dummy Guidance components
+    dummy_pitch_program = Mock(spec=StageAwarePitchProgram)
+    dummy_pitch_program.booster_time_points = np.array([0.0])
+    dummy_pitch_program.upper_time_points = np.array([0.0])
+    dummy_pitch_program.booster_angles_rad = np.array([0.0])
+    dummy_pitch_program.upper_angles_rad = np.array([0.0])
+    dummy_pitch_program.prograde_threshold = 0.0
+    dummy_pitch_program.earth_radius = env_config.earth_radius_m
+    dummy_pitch_program.return_value = np.array([0,0,1]) # Mock __call__ method
+
+    dummy_upper_throttle_program = Mock(spec=ParameterizedThrottleProgram)
+    dummy_upper_throttle_program.schedule = [[0.0, 1.0]]
+    dummy_upper_throttle_program.return_value = 1.0 # Mock __call__ method
+
+    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_rocket_stages_info = [
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
+    ]
+    guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=dummy_pitch_program,
+        upper_throttle_program=dummy_upper_throttle_program,
+        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        rocket_stages_info=dummy_rocket_stages_info
+    )
 
     sim = Simulation(
         earth=earth,
@@ -137,7 +170,7 @@ def test_simulation_orbit_exit():
         sim_config=sim_config,
         env_config=env_config,
         log_config=log_config,
-        integrator=integrator,
+        integrator=RK4(), # Fixed: directly use RK4
         guidance=guidance,
     )
 
@@ -170,7 +203,33 @@ def test_simulation_impact_terminates():
     atmosphere = DummyAtmosphere(env_config)
     aero = DummyAero(atmosphere=atmosphere, env_config=env_config)
     rocket = build_dummy_rocket(hw_config, env_config)
-    guidance = Guidance()
+    # Dummy Guidance components
+    dummy_pitch_program = Mock(spec=StageAwarePitchProgram)
+    dummy_pitch_program.booster_time_points = np.array([0.0])
+    dummy_pitch_program.upper_time_points = np.array([0.0])
+    dummy_pitch_program.booster_angles_rad = np.array([0.0])
+    dummy_pitch_program.upper_angles_rad = np.array([0.0])
+    dummy_pitch_program.prograde_threshold = 0.0
+    dummy_pitch_program.earth_radius = env_config.earth_radius_m
+    dummy_pitch_program.return_value = np.array([0,0,1]) # Mock __call__ method
+
+    dummy_upper_throttle_program = Mock(spec=ParameterizedThrottleProgram)
+    dummy_upper_throttle_program.schedule = [[0.0, 1.0]]
+    dummy_upper_throttle_program.return_value = 1.0 # Mock __call__ method
+
+    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_rocket_stages_info = [
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
+    ]
+    guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=dummy_pitch_program,
+        upper_throttle_program=dummy_upper_throttle_program,
+        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        rocket_stages_info=dummy_rocket_stages_info
+    )
 
     sim = Simulation(
         earth=earth,
@@ -215,7 +274,33 @@ def test_simulation_stage_separation_and_mass_drop():
     rocket.stage_prop_remaining = [5.0, 1.0]
     rocket.separation_time_planned = 0.0 # Trigger separation immediately
     rocket.upper_ignition_delay = 0.0 # No delay for test
-    guidance = Guidance()
+    # Dummy Guidance components
+    dummy_pitch_program = Mock(spec=StageAwarePitchProgram)
+    dummy_pitch_program.booster_time_points = np.array([0.0])
+    dummy_pitch_program.upper_time_points = np.array([0.0])
+    dummy_pitch_program.booster_angles_rad = np.array([0.0])
+    dummy_pitch_program.upper_angles_rad = np.array([0.0])
+    dummy_pitch_program.prograde_threshold = 0.0
+    dummy_pitch_program.earth_radius = env_config.earth_radius_m
+    dummy_pitch_program.return_value = np.array([0,0,1]) # Mock __call__ method
+
+    dummy_upper_throttle_program = Mock(spec=ParameterizedThrottleProgram)
+    dummy_upper_throttle_program.schedule = [[0.0, 1.0]]
+    dummy_upper_throttle_program.return_value = 1.0 # Mock __call__ method
+
+    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_rocket_stages_info = [
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
+        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
+    ]
+    guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=dummy_pitch_program,
+        upper_throttle_program=dummy_upper_throttle_program,
+        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        rocket_stages_info=dummy_rocket_stages_info
+    )
 
     sim = Simulation(
         earth=earth,

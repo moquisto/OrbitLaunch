@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from .atmosphere import AtmosphereModel
-from .config import EnvironmentConfig
-from typing import Callable, Union, Any, Optional
+from typing import Callable, Union, Any, Optional, TYPE_CHECKING
 import numpy as np
 
+if TYPE_CHECKING:
+    from .config import EnvironmentConfig
 
-def get_wind_at_altitude(altitude: float, env_config: EnvironmentConfig, r_eci: Optional[np.ndarray] = None) -> np.ndarray:
+
+def get_wind_at_altitude(altitude: float, env_config: "EnvironmentConfig", r_eci: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Returns a wind vector based on altitude to model the jet stream.
     The wind profile ramps up to a peak speed in the jet stream layer (8-13 km)
@@ -63,7 +65,7 @@ def get_wind_at_altitude(altitude: float, env_config: EnvironmentConfig, r_eci: 
     return direction * wind_speed
 
 
-def mach_dependent_cd(mach: float, env_config: EnvironmentConfig) -> float:
+def mach_dependent_cd(mach: float, env_config: "EnvironmentConfig") -> float:
     """
     A representative drag coefficient (Cd) curve for a generic launch vehicle,
     based on the Mach number. This captures the characteristic transonic drag
@@ -81,7 +83,7 @@ class CdModel:
     returning Cd as a function of Mach number.
     """
 
-    def __init__(self, value_or_callable: Union[float, Callable[[float, EnvironmentConfig], float]], env_config: EnvironmentConfig):
+    def __init__(self, value_or_callable: Union[float, Callable[[float, "EnvironmentConfig"], float]], env_config: "EnvironmentConfig"):
         self.value_or_callable = value_or_callable
         self.env_config = env_config
 
@@ -100,7 +102,7 @@ class CdModel:
 class Aerodynamics:
     atmosphere: AtmosphereModel
     cd_model: CdModel
-    env_config: EnvironmentConfig
+    env_config: "EnvironmentConfig"
     reference_area: Optional[float] = None  # fallback if rocket is not provided
 
 
@@ -156,8 +158,8 @@ class Aerodynamics:
             return np.zeros(3)
 
         # Speed of sound (ideal gas, dry air) and Mach number.
-        gamma = self.config.air_gamma
-        R_air = self.config.air_gas_constant
+        gamma = self.env_config.air_gamma
+        R_air = self.env_config.air_gas_constant
         a = np.sqrt(max(gamma * R_air * T, 0.0))
         mach = v_rel_mag / a if a > 0.0 else 0.0
 
