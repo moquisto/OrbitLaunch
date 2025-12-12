@@ -50,7 +50,7 @@ class EventManager:
             # self.rocket.reset_stage_state(state.stage_index) # This would require adding such a method to Rocket
 
             # Log the event for telemetry (future improvement)
-            print(f"DEBUG: Stage separation initiated at t={state.t_sim}, new stage_index={state.stage_index}, mass dropped={guidance_command.dry_mass_to_drop} kg")
+            print(f"DEBUG: Stage separation initiated, new stage_index={state.stage_index}, mass dropped={guidance_command.dry_mass_to_drop} kg")
 
         # Other events can be added here
         # E.g., if guidance_command.deploy_fairings: ...

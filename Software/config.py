@@ -63,7 +63,7 @@ class SoftwareConfig:
     )
     
     # Upper Stage: Simple burn
-    upper_stage_throttle_program: list = dataclasses.field(
+    upper_throttle_program_schedule: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 1.0],    # Full power
             [350.0, 1.0],  # Long burn to orbit
@@ -89,47 +89,17 @@ class SoftwareConfig:
     engine_shutdown_ramp_s: float = 0.5          # [s] (time for engines to ramp down to zero thrust)
     throttle_full_shape_threshold: float = 0.99  # (shape value considered "full" for min throttle enforcement)
 
-    def create_pitch_program(self, env_config: EnvironmentConfig):
-        from Software.guidance import StageAwarePitchProgram # Local import
-        if self.pitch_guidance_mode == 'parameterized':
-            return StageAwarePitchProgram(
-                sw_config=self,
-                env_config=env_config
-            )
-        elif self.pitch_guidance_mode == 'function':
-            try:
-                module_name, func_name = self.pitch_guidance_function.rsplit('.', 1)
-                module = importlib.import_module(module_name)
-                return getattr(module, func_name)
-            except (ImportError, AttributeError, ValueError) as e:
-                raise ImportError(f"Could not load pitch guidance function '{self.pitch_guidance_function}': {e}")
-        else:
-            raise ValueError(f"Unknown pitch_guidance_mode: '{self.pitch_guidance_mode}'")
+    def create_guidance(self, rocket_stages_info, env_config: EnvironmentConfig) -> "Guidance": # Add env_config
+        from Software.guidance import Guidance, StageAwarePitchProgram, ParameterizedThrottleProgram # Local import
+        pitch_program_instance = StageAwarePitchProgram(sw_config=self, env_config=env_config)
+        upper_throttle_program_instance = ParameterizedThrottleProgram(schedule=self.upper_throttle_program_schedule)
+        booster_throttle_program_instance = ParameterizedThrottleProgram(schedule=self.booster_throttle_program)
 
-    def create_throttle_program(self, target_radius: float, mu: float):
-        from Software.guidance import ParameterizedThrottleProgram # Local import
-        if self.throttle_guidance_mode == 'parameterized':
-            # This returns a ParameterizedThrottleProgram for the upper stage.
-            # The booster throttle program needs to be handled separately where the Rocket is built.
-            return ParameterizedThrottleProgram(schedule=self.upper_stage_throttle_program)
-        elif self.throttle_guidance_mode == 'function':
-            try:
-                module_name, class_name = self.throttle_guidance_function_class.rsplit('.', 1)
-                module = importlib.import_module(module_name)
-                ControllerClass = getattr(module, class_name)
-                return ControllerClass(target_radius=target_radius, mu=mu)
-            except (ImportError, AttributeError, ValueError) as e:
-                raise ImportError(f"Could not load throttle guidance class '{self.throttle_guidance_function_class}': {e}")
-        else:
-            raise ValueError(f"Unknown throttle_guidance_mode: '{self.throttle_guidance_mode}'")
-
-    def create_guidance(self, pitch_program, throttle_schedule, booster_throttle_schedule, rocket_stages_info, env_config: EnvironmentConfig) -> "Guidance": # Add env_config
-        from Software.guidance import Guidance # Local import
         return Guidance(
             sw_config=self,
             env_config=env_config, # Use the passed env_config instance
-            pitch_program=pitch_program,
-            upper_throttle_program=throttle_schedule, # This is the upper stage throttle program
-            booster_throttle_schedule=booster_throttle_schedule,
+            pitch_program=pitch_program_instance,
+            upper_throttle_program=upper_throttle_program_instance, # This is the upper stage throttle program
+            booster_throttle_program=booster_throttle_program_instance,
             rocket_stages_info=rocket_stages_info
         )

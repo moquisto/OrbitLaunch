@@ -10,7 +10,8 @@ from Hardware.config import HardwareConfig
 from Software.config import SoftwareConfig
 from Main.config import SimulationConfig
 from Logging.config import LoggingConfig
-from Analysis.optimization import ObjectiveFunctionWrapper, run_simulation_wrapper, soft_bounds_penalty, PENALTY_CRASH, TARGET_TOLERANCE_M, Counter, PERIGEE_FLOOR_M, ECC_TOLERANCE
+from Analysis.optimization import ObjectiveFunctionWrapper, run_simulation_wrapper, soft_bounds_penalty
+from Analysis.cost_functions import PENALTY_CRASH, TARGET_TOLERANCE_M
 
 @pytest.fixture
 def configs():
@@ -58,7 +59,8 @@ def mock_sim_run_result(configs):
             self.r = [np.array([0,0,0]), r_final]
             self.v = [np.array([0,0,0]), v_final]
             self.altitude = [0, 100000.0, 200000.0]
-            self.time = [0, 100, 200]
+            self.t_sim = [0, 100, 200] # Added t_sim attribute
+            self.orbit_achieved = False # Add this, as it is checked by evaluate_simulation_results
 
     return MockLog()
 
@@ -72,6 +74,8 @@ def mock_sim_run_crash_result(configs):
             self.r = [np.array([0,0,0]), np.array([env_config.earth_radius_m - 10000, 0, 0])]
             self.v = [np.array([0,0,0]), np.array([100, 0, 0])]
             self.altitude = [0, 5000, 1000]
+            self.t_sim = [0, 10, 20] # Added t_sim attribute
+            self.orbit_achieved = False # Add this, as it is checked by evaluate_simulation_results
 
     return MockLog()
 
@@ -88,6 +92,8 @@ def mock_sim_run_suborbital_result(configs):
             self.r = [np.array([0,0,0]), r_final_sub]
             self.v = [np.array([0,0,0]), v_final_sub]
             self.altitude = [0, 50000.0]
+            self.t_sim = [0, 50, 100] # Added t_sim attribute
+            self.orbit_achieved = False # Add this, as it is checked by evaluate_simulation_results
     return MockLog()
 
 
@@ -98,17 +104,18 @@ def mock_build_simulation_base():
         mock_sim = Mock()
         mock_sim.guidance = Mock()
         mock_sim.rocket = Mock()
+        mock_sim_config = Mock(main_duration_s=10000.0) # Mock sim_config with main_duration_s
         with patch('Software.guidance.create_pitch_program_callable') as mock_create_pitch: # Corrected patch target
             mock_create_pitch.return_value = Mock(name="mock_pitch_program_callable")
             # main_orchestrator now returns 5 values: sim, state0, t0, log_config, analysis_config
-            mock_main_orchestrator.return_value = (mock_sim, Mock(m=100000.0), 0.0, Mock(), Mock())
+            mock_main_orchestrator.return_value = (mock_sim, Mock(m=100000.0), 0.0, Mock(), mock_sim_config)
             yield mock_main_orchestrator, mock_sim, mock_create_pitch
 
 @pytest.fixture
 def mock_build_simulation_success(mock_build_simulation_base, mock_sim_run_result, mock_orbital_elements_success):
     mock_main_orchestrator, mock_sim, mock_create_pitch = mock_build_simulation_base
     mock_sim.run.return_value = mock_sim_run_result
-    with patch('Analysis.optimization.orbital_elements_from_state') as mock_oe: # Corrected patch target
+    with patch('Analysis.cost_functions.orbital_elements_from_state') as mock_oe: # Corrected patch target
         mock_oe.return_value = mock_orbital_elements_success
         yield mock_main_orchestrator, mock_sim, mock_create_pitch, mock_oe
 
@@ -116,7 +123,7 @@ def mock_build_simulation_success(mock_build_simulation_base, mock_sim_run_resul
 def mock_build_simulation_crash(mock_build_simulation_base, mock_sim_run_crash_result, mock_orbital_elements_crash):
     mock_main_orchestrator, mock_sim, mock_create_pitch = mock_build_simulation_base
     mock_sim.run.return_value = mock_sim_run_crash_result
-    with patch('Analysis.optimization.orbital_elements_from_state') as mock_oe: # Corrected patch target
+    with patch('Analysis.cost_functions.orbital_elements_from_state') as mock_oe: # Corrected patch target
         mock_oe.return_value = mock_orbital_elements_crash
         yield mock_main_orchestrator, mock_sim, mock_create_pitch, mock_oe
 
@@ -124,7 +131,7 @@ def mock_build_simulation_crash(mock_build_simulation_base, mock_sim_run_crash_r
 def mock_build_simulation_suborbital(mock_build_simulation_base, mock_sim_run_suborbital_result, mock_orbital_elements_suborbital):
     mock_main_orchestrator, mock_sim, mock_create_pitch = mock_build_simulation_base
     mock_sim.run.return_value = mock_sim_run_suborbital_result
-    with patch('Analysis.optimization.orbital_elements_from_state') as mock_oe: # Corrected patch target
+    with patch('Analysis.cost_functions.orbital_elements_from_state') as mock_oe: # Corrected patch target
         mock_oe.return_value = mock_orbital_elements_suborbital
         yield mock_main_orchestrator, mock_sim, mock_create_pitch, mock_oe
 

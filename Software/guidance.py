@@ -4,6 +4,7 @@ import numpy as np
 from Main.state import State
 # from .config import SoftwareConfig # Removed module-level import
 from Environment.config import EnvironmentConfig
+from Analysis.config import OptimizationParams
 
 if TYPE_CHECKING:
     from .config import SoftwareConfig
@@ -170,6 +171,169 @@ class ParameterizedThrottleProgram:
         )
         return float(throttle)
 
+def create_throttle_schedule_from_ratios(
+    burn_duration: float,
+    throttle_levels: np.ndarray,
+    switch_ratios: np.ndarray
+) -> List[List[float]]:
+    """
+    Constructs a step-function throttle schedule from throttle levels and switch ratios.
+
+    Parameters
+    ----------
+    burn_duration : float
+        The total duration of the burn for which the throttle schedule is created.
+    throttle_levels : np.ndarray
+        An array of normalized throttle levels (0.0 to 1.0).
+    switch_ratios : np.ndarray
+        An array of normalized time ratios (0.0 to 1.0) at which throttle levels switch.
+        These ratios are relative to the `burn_duration`.
+
+    Returns
+    -------
+    List[List[float]]
+        A list of [time_sec, throttle_level] pairs representing the throttle schedule.
+    """
+    schedule = []
+    
+    # Ensure switch ratios are unique and sorted to avoid issues with interpolation/logic
+    # Add a small epsilon to distinct but very close ratios to ensure separate points
+    unique_switch_ratios_times = []
+    for ratio in sorted(switch_ratios):
+        time_point = burn_duration * ratio
+        if not unique_switch_ratios_times or (time_point - unique_switch_ratios_times[-1]) > 1e-6:
+            unique_switch_ratios_times.append(time_point)
+
+    # The first throttle level applies from t=0
+    schedule.append([0.0, throttle_levels[0]])
+
+    level_idx = 0
+    for time_point in unique_switch_ratios_times:
+        # If the switch point is after the current schedule's last time,
+        # it means the previous throttle level was held until this point.
+        # Add a point for the previous level right before the switch
+        if time_point > schedule[-1][0]:
+            # Before switching, add the current active level at this time point
+            schedule.append([time_point, throttle_levels[level_idx]])
+            # Then immediately switch to the next level (with a small offset if needed)
+            level_idx += 1
+            schedule.append([time_point + 1e-6, throttle_levels[level_idx]])
+        else: # Handle cases where switch time is same as last entry (should be prevented by unique_switch_ratios_times)
+              # Or if it's earlier (this implies an unsorted switch_ratios input, handled by sorting)
+              # If we hit this, it means a switch is happening at an already existing time point or before it.
+              # In a step function, we just update the throttle level at that precise time point.
+            level_idx += 1 # Move to the next throttle level
+            schedule[-1][1] = throttle_levels[level_idx] # Update the throttle level for the existing time point
+
+    # Ensure the final throttle level is applied for the remainder of the burn, up to burn_duration
+    # This might overwrite the last point if it's already at burn_duration, which is fine for step function
+    if schedule[-1][0] < burn_duration:
+        schedule.append([burn_duration, throttle_levels[level_idx]])
+    elif schedule[-1][0] > burn_duration and len(schedule) > 1: # If last point is past burn_duration, trim it or adjust
+        # If the last point is very slightly past due to 1e-6, adjust its time
+        if schedule[-1][0] - burn_duration < 1e-5:
+            schedule[-1][0] = burn_duration
+        else: # If significantly past, it implies an error or an endpoint past expected duration.
+              # For this helper, we assume levels match up to burn_duration.
+              # A more complex scenario might require trimming or an error.
+              pass # For now, let it be - the ParameterizedThrottleProgram will handle interpolation
+
+    # After burn_duration, throttle goes to 0
+    schedule.append([burn_duration + 1.0, 0.0]) # Add a point slightly after burn_duration to ensure throttle goes to 0
+
+    return schedule
+
+def configure_software_for_optimization(
+    opt_params: OptimizationParams, 
+    sw_config: SoftwareConfig, 
+    sim_config: SimulationConfig,
+    env_config: EnvironmentConfig
+) -> Tuple[SoftwareConfig, SimulationConfig]:
+    """
+    Configures SoftwareConfig and SimulationConfig based on optimization parameters.
+    This function de-scales the normalized optimization parameters and applies them
+    to the simulation's software and environment configurations.
+    """
+
+    # --- De-scaling Optimization Parameters ---
+    # Pitch program (booster)
+    pitch_points_booster = [
+        [opt_params.booster_pitch_time_0, opt_params.booster_pitch_angle_0],
+        [opt_params.booster_pitch_time_1, opt_params.booster_pitch_angle_1],
+        [opt_params.booster_pitch_time_2, opt_params.booster_pitch_angle_2],
+        [opt_params.booster_pitch_time_3, opt_params.booster_pitch_angle_3],
+        [opt_params.booster_pitch_time_4, opt_params.booster_pitch_angle_4]
+    ]
+    # Pitch program (upper stage)
+    pitch_points_upper = [
+        [opt_params.upper_pitch_time_0, opt_params.upper_pitch_angle_0],
+        [opt_params.upper_pitch_time_1, opt_params.upper_pitch_angle_1],
+        [opt_params.upper_pitch_time_2, opt_params.upper_pitch_angle_2]
+    ]
+
+    # Throttle program (upper stage)
+    upper_throttle_levels = np.array([
+        opt_params.upper_throttle_level_0,
+        opt_params.upper_throttle_level_1,
+        opt_params.upper_throttle_level_2,
+        opt_params.upper_throttle_level_3
+    ])
+    upper_throttle_switch_ratios = np.array([
+        opt_params.upper_throttle_switch_ratio_0,
+        opt_params.upper_throttle_switch_ratio_1,
+        opt_params.upper_throttle_switch_ratio_2
+    ])
+    
+    # Placeholder for upper stage burn duration - needs to be optimized or determined dynamically
+    upper_burn_duration_proxy = sim_config.main_duration_s * 0.5 
+
+    upper_throttle_program_schedule = create_throttle_schedule_from_ratios(
+        burn_duration=upper_burn_duration_proxy, 
+        throttle_levels=upper_throttle_levels,
+        switch_ratios=upper_throttle_switch_ratios
+    )
+
+    # Throttle program (booster)
+    booster_throttle_levels = np.array([
+        opt_params.booster_throttle_level_0,
+        opt_params.booster_throttle_level_1,
+        opt_params.booster_throttle_level_2,
+        opt_params.booster_throttle_level_3
+    ])
+    booster_throttle_switch_ratios = np.array([
+        opt_params.booster_throttle_switch_ratio_0,
+        opt_params.booster_throttle_switch_ratio_1,
+        opt_params.booster_throttle_switch_ratio_2
+    ])
+    
+    # Placeholder for booster burn duration - this will be refined later
+    booster_burn_duration_proxy = sim_config.main_duration_s * 0.1 
+
+    booster_throttle_program_schedule = create_throttle_schedule_from_ratios(
+        burn_duration=booster_burn_duration_proxy,
+        throttle_levels=booster_throttle_levels,
+        switch_ratios=booster_throttle_switch_ratios
+    )
+
+    # Apply de-scaled parameters to sw_config and sim_config
+    sw_config.pitch_program = pitch_points_booster
+    sw_config.upper_pitch_program = pitch_points_upper
+    sw_config.upper_throttle_program_schedule = upper_throttle_program_schedule
+    sw_config.booster_throttle_program = booster_throttle_program_schedule
+    sw_config.meco_mach = opt_params.meco_mach
+    sw_config.separation_delay_s = opt_params.coast_s
+    sw_config.upper_ignition_delay_s = opt_params.upper_ignition_delay_s
+
+    # This should be handled by the optimization process itself, not hardcoded scaling
+    # The optimization is already working with orbit_altitude_factor, but the sim_config target
+    # should directly come from the optimization result if it were to be directly used.
+    # For now, let's assume opt_params.orbit_altitude_factor directly represents the target altitude or a scaled version of it.
+    # This also depends on the actual OptimizationParams definition in Analysis/config.py, which doesn't seem to have orbit_altitude_factor.
+    # Let's temporarily remove this line and re-evaluate the target_orbit_altitude_m later.
+    # sim_config.target_orbit_altitude_m = opt_params.orbit_altitude_factor * env_config.earth_radius_m * 2 # Placeholder scaling factor
+    
+    return sw_config, sim_config
+
 from dataclasses import dataclass
 
 @dataclass
@@ -187,7 +351,7 @@ class Guidance:
         env_config: EnvironmentConfig,
         pitch_program: StageAwarePitchProgram,
         upper_throttle_program: ParameterizedThrottleProgram,
-        booster_throttle_schedule: List[List[float]],
+        booster_throttle_program: ParameterizedThrottleProgram,
         rocket_stages_info: List[Any], # Pass rocket stages info for dry masses
     ):
         self.sw_config = sw_config
@@ -207,7 +371,7 @@ class Guidance:
         self.throttle_full_shape_threshold = float(np.clip(sw_config.throttle_full_shape_threshold, 0.0, 1.0))
 
         # Booster throttle program (schedule, not an instance)
-        self.booster_throttle_program = ParameterizedThrottleProgram(schedule=booster_throttle_schedule)
+        self.booster_throttle_program = booster_throttle_program
 
         # Internal state for event timing and propellant tracking
         self.meco_time: float | None = None

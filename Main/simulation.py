@@ -26,7 +26,7 @@ from Logging.config import LoggingConfig
 @dataclass
 class ControlCommand:
     throttle: float
-    thrust_direction: np.ndarray  # unit vector in ECI
+    thrust_direction_eci: np.ndarray  # unit vector in ECI
 
 
 class Simulation:

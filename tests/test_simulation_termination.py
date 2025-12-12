@@ -1,7 +1,7 @@
 import numpy as np
 import types
 import pytest
-from unittest.mock import Mock # Added import for Mock
+from unittest.mock import Mock, patch
 
 from Main.simulation import Simulation, Guidance
 from Main.state import State
@@ -126,7 +126,13 @@ def test_simulation_orbit_exit():
     # Instantiate configs
     env_config = EnvironmentConfig()
     hw_config = HardwareConfig()
-    sim_config = SimulationConfig()
+    sim_config = SimulationConfig(
+        target_orbit_alt_m=1.0,  # Target is surface orbit for this test
+        orbit_alt_tol=10.0,      # Small tolerance for altitude
+        orbit_speed_tol=10.0,    # Small tolerance for speed
+        orbit_radial_tol=10.0,   # Small tolerance for radial velocity
+        exit_on_orbit=True       # Exit once orbit is achieved
+    )
     log_config = LoggingConfig()
     sw_config = SoftwareConfig() # Needed for Simulation constructor
 
@@ -148,7 +154,7 @@ def test_simulation_orbit_exit():
     dummy_upper_throttle_program.schedule = [[0.0, 1.0]]
     dummy_upper_throttle_program.return_value = 1.0 # Mock __call__ method
 
-    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_booster_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
     dummy_rocket_stages_info = [
         types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
         types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
@@ -158,7 +164,7 @@ def test_simulation_orbit_exit():
         env_config=env_config,
         pitch_program=dummy_pitch_program,
         upper_throttle_program=dummy_upper_throttle_program,
-        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        booster_throttle_program=dummy_booster_program,
         rocket_stages_info=dummy_rocket_stages_info
     )
 
@@ -217,7 +223,7 @@ def test_simulation_impact_terminates():
     dummy_upper_throttle_program.schedule = [[0.0, 1.0]]
     dummy_upper_throttle_program.return_value = 1.0 # Mock __call__ method
 
-    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_booster_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
     dummy_rocket_stages_info = [
         types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
         types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
@@ -227,7 +233,7 @@ def test_simulation_impact_terminates():
         env_config=env_config,
         pitch_program=dummy_pitch_program,
         upper_throttle_program=dummy_upper_throttle_program,
-        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        booster_throttle_program=dummy_booster_program,
         rocket_stages_info=dummy_rocket_stages_info
     )
 
@@ -265,6 +271,7 @@ def test_simulation_stage_separation_and_mass_drop():
     sim_config = SimulationConfig()
     log_config = LoggingConfig()
     sw_config = SoftwareConfig()
+    sw_config.separation_delay_s = 0.0 # Set separation delay to 0 for immediate separation in test
 
     earth = DummyEarth(mu=env_config.earth_mu, radius=env_config.earth_radius_m, omega_vec=env_config.earth_omega_vec)
     atmosphere = DummyAtmosphere(env_config)
@@ -272,35 +279,16 @@ def test_simulation_stage_separation_and_mass_drop():
     rocket = build_dummy_rocket(hw_config, env_config)
     # Manually set up rocket state for separation test
     rocket.stage_prop_remaining = [5.0, 1.0]
-    rocket.separation_time_planned = 0.0 # Trigger separation immediately
-    rocket.upper_ignition_delay = 0.0 # No delay for test
-    # Dummy Guidance components
-    dummy_pitch_program = Mock(spec=StageAwarePitchProgram)
-    dummy_pitch_program.booster_time_points = np.array([0.0])
-    dummy_pitch_program.upper_time_points = np.array([0.0])
-    dummy_pitch_program.booster_angles_rad = np.array([0.0])
-    dummy_pitch_program.upper_angles_rad = np.array([0.0])
-    dummy_pitch_program.prograde_threshold = 0.0
-    dummy_pitch_program.earth_radius = env_config.earth_radius_m
-    dummy_pitch_program.return_value = np.array([0,0,1]) # Mock __call__ method
-
-    dummy_upper_throttle_program = Mock(spec=ParameterizedThrottleProgram)
-    dummy_upper_throttle_program.schedule = [[0.0, 1.0]]
-    dummy_upper_throttle_program.return_value = 1.0 # Mock __call__ method
-
-    dummy_booster_throttle_schedule = [[0.0, 1.0]]
-    dummy_rocket_stages_info = [
-        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
-        types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0)
-    ]
-    guidance = Guidance(
-        sw_config=sw_config,
-        env_config=env_config,
-        pitch_program=dummy_pitch_program,
-        upper_throttle_program=dummy_upper_throttle_program,
-        booster_throttle_schedule=dummy_booster_throttle_schedule,
-        rocket_stages_info=dummy_rocket_stages_info
-    )
+    # The Guidance object needs to initiate the separation
+    # Mock guidance.compute_command to always initiate separation for this test
+    with patch.object(guidance, 'compute_command') as mock_compute_command:
+        mock_compute_command.return_value = GuidanceCommand(
+            throttle=1.0,
+            thrust_direction_eci=np.array([0, 0, 1]),
+            initiate_stage_separation=True,
+            new_stage_index=1,
+            dry_mass_to_drop=hw_config.booster_dry_mass + rocket.stages[0].prop_mass # Assuming all prop in booster is dropped
+        )
 
     sim = Simulation(
         earth=earth,

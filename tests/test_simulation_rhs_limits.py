@@ -79,7 +79,7 @@ def test_rhs_scales_thrust_by_max_accel(monkeypatch):
     # Dummy Guidance components
     dummy_pitch_program = StageAwarePitchProgram(sw_config=sw_config, env_config=env_config)
     dummy_upper_throttle_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
-    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_booster_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
     # Need a basic rocket_stages_info for Guidance
     dummy_rocket_stages_info = [
         types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
@@ -90,7 +90,7 @@ def test_rhs_scales_thrust_by_max_accel(monkeypatch):
         env_config=env_config,
         pitch_program=dummy_pitch_program,
         upper_throttle_program=dummy_upper_throttle_program,
-        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        booster_throttle_program=dummy_booster_program,
         rocket_stages_info=dummy_rocket_stages_info
     )
 
@@ -112,7 +112,7 @@ def test_rhs_scales_thrust_by_max_accel(monkeypatch):
     state.m = 1.0
     state.stage_index = 0
 
-    control = ControlCommand(throttle=1.0, thrust_direction=np.array([1.0, 0.0, 0.0])) # Unit vector for thrust direction
+    control = ControlCommand(throttle=1.0, thrust_direction_eci=np.array([1.0, 0.0, 0.0])) # Unit vector for thrust direction
 
     _, dv_dt, _, _ = sim._rhs(t_env=0.0, t_sim=0.0, state=state, control=control)
     assert np.linalg.norm(dv_dt) <= 1.0 + 1e-6
@@ -152,7 +152,7 @@ def test_rhs_scales_throttle_by_max_q(monkeypatch):
     # Dummy Guidance components
     dummy_pitch_program = StageAwarePitchProgram(sw_config=sw_config, env_config=env_config)
     dummy_upper_throttle_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
-    dummy_booster_throttle_schedule = [[0.0, 1.0]]
+    dummy_booster_program = ParameterizedThrottleProgram(schedule=[[0.0, 1.0]])
     # Need a basic rocket_stages_info for Guidance
     dummy_rocket_stages_info = [
         types.SimpleNamespace(dry_mass=1.0, prop_mass=1.0),
@@ -163,7 +163,7 @@ def test_rhs_scales_throttle_by_max_q(monkeypatch):
         env_config=env_config,
         pitch_program=dummy_pitch_program,
         upper_throttle_program=dummy_upper_throttle_program,
-        booster_throttle_schedule=dummy_booster_throttle_schedule,
+        booster_throttle_program=dummy_booster_program,
         rocket_stages_info=dummy_rocket_stages_info
     )
 
@@ -185,7 +185,7 @@ def test_rhs_scales_throttle_by_max_q(monkeypatch):
     state.m = 1.0
     state.stage_index = 0
 
-    control = ControlCommand(throttle=1.0, thrust_direction=np.array([1.0, 0.0, 0.0]))
+    control = ControlCommand(throttle=1.0, thrust_direction_eci=np.array([1.0, 0.0, 0.0]))
 
     sim._rhs(t_env=0.0, t_sim=0.0, state=state, control=control)
 

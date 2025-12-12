@@ -2,16 +2,21 @@
 
 import numpy as np
 from typing import TYPE_CHECKING
+from Main.telemetry import Logger
+from Environment.gravity import EarthModel, orbital_elements_from_state
+from Environment.config import EnvironmentConfig
+from Main.config import SimulationConfig
 
-if TYPE_CHECKING:
-    from Main.telemetry import Logger
-    from Environment.gravity import EarthModel
+# Constants for cost calculation (can be moved to Analysis/config.py later if needed)
+PENALTY_CRASH = 1e9        # "Soft Wall" for failed orbits
+PERIGEE_FLOOR_M = 120_000.0  # Minimum acceptable perigee altitude
+ECC_TOLERANCE = 0.01         # Maximum eccentricity tolerated before penalty
+TARGET_TOLERANCE_M = 10000.0
 
 def calculate_orbital_insertion_cost(
     log: Logger,
     earth_model: EarthModel,
     target_altitude_m: float,
-    target_inclination_deg: float = 0.0,
     dry_mass_remaining: float = 0.0,
 ) -> float:
     """
@@ -45,13 +50,9 @@ def calculate_orbital_insertion_cost(
     final_v_norm = np.linalg.norm(log.v[-1])
     final_altitude = final_r_norm - earth_model.radius
 
-    # Cost for altitude deviation
-    altitude_deviation_cost = abs(final_altitude - target_altitude_m)
-
     # Cost for not achieving orbit or having a very elliptical orbit
     # A simple proxy: if specific energy is very negative, it's a sub-orbital trajectory.
     # If rp or ra are significantly different from target, it's not circular.
-    from Environment.gravity import orbital_elements_from_state
     a, rp, ra = orbital_elements_from_state(log.r[-1], log.v[-1], earth_model.mu)
     
     perigee_altitude = (rp - earth_model.radius) if rp is not None else -float('inf')
@@ -103,5 +104,77 @@ def calculate_reusability_cost(
     # Penalize large landing error for booster (future)
     if booster_landing_error_m is not None:
         cost += booster_landing_error_m * 0.01
-
     return cost
+
+def evaluate_simulation_results(
+    log: Logger,
+    initial_mass: float,
+    cfg_env: EnvironmentConfig,
+    sim_config: SimulationConfig,
+    max_altitude: float
+) -> dict:
+    """
+    Evaluates the results of a simulation run to calculate error, fuel used, and status.
+
+    Parameters
+    ----------
+    log : Logger
+        The simulation log containing the trajectory data.
+    initial_mass : float
+        The initial mass of the rocket at the start of the simulation.
+    cfg_env : EnvironmentConfig
+        The environment configuration used in the simulation.
+    sim_config : SimulationConfig
+        The simulation configuration, including target orbit altitude.
+    max_altitude : float
+        The maximum altitude reached during the simulation.
+
+    Returns
+    -------
+    dict
+        A dictionary containing:
+        - "fuel": Fuel consumed in kg.
+        - "error": Orbital error in meters.
+        - "status": A string indicating the outcome of the simulation ("CRASH", "SUBORBIT", "PERFECT", "GOOD", "OK", "SIM_FAIL").
+        - "perigee_alt_m": Perigee altitude in meters.
+        - "eccentricity": Eccentricity of the final orbit.
+    """
+    results = {"fuel": 0.0, "error": PENALTY_CRASH, "status": "INIT"}
+
+    if not log.t_sim or len(log.t_sim) == 0:
+        results["status"] = "SIM_FAIL_NO_DATA"
+        results["error"] = PENALTY_CRASH
+        return results
+
+    results["fuel"] = initial_mass - log.m[-1]
+
+    r, v = log.r[-1], log.v[-1]
+    a, rp, ra = orbital_elements_from_state(r, v, cfg_env.earth_mu)
+
+    if rp is None or ra is None or rp < (cfg_env.earth_radius_m - 5000): # -5000 to account for surface variation
+        results["status"] = "CRASH"
+        results["error"] = PENALTY_CRASH + (sim_config.target_orbit_alt_m - max_altitude)
+        return results
+
+    target_r = cfg_env.earth_radius_m + sim_config.target_orbit_alt_m
+    results["error"] = abs(rp - target_r) + abs(ra - target_r)
+
+    perigee_alt = rp - cfg_env.earth_radius_m
+    ecc = abs((ra - rp) / (ra + rp)) if (ra + rp) != 0 else 0
+    results["perigee_alt_m"] = perigee_alt
+    results["eccentricity"] = ecc
+
+    perigee_penalty = max(0.0, PERIGEE_FLOOR_M - perigee_alt) * 100.0
+    ecc_penalty = max(0.0, (ecc or 0.0) - ECC_TOLERANCE) * target_r
+    results["error"] += perigee_penalty + ecc_penalty
+
+    if perigee_alt < PERIGEE_FLOOR_M:
+        results["status"] = "SUBORBIT"
+    elif results["error"] < TARGET_TOLERANCE_M * 0.5: # Half of target tolerance for "PERFECT"
+        results["status"] = "PERFECT"
+    elif results["error"] < TARGET_TOLERANCE_M * 2: # Twice of target tolerance for "GOOD"
+        results["status"] = "GOOD"
+    else:
+        results["status"] = "OK"
+    
+    return results

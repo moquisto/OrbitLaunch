@@ -20,7 +20,7 @@ from Environment.gravity import orbital_elements_from_state
 from Hardware.rocket import Rocket
 from Hardware.config import HardwareConfig
 
-from Software.guidance import Guidance, ParameterizedThrottleProgram
+from Software.guidance import Guidance
 from Software.config import SoftwareConfig
 
 from Main.integrators import RK4, VelocityVerlet
@@ -39,10 +39,6 @@ def main_orchestrator(
     sim_config: Optional[SimulationConfig] = None,
     log_config: Optional[LoggingConfig] = None,
     analysis_config: Optional[AnalysisConfig] = None,
-    # Optional guidance program instances for optimization
-    pitch_program_instance: Optional[Any] = None,
-    upper_throttle_program_instance: Optional[Any] = None,
-    booster_throttle_schedule_list: Optional[List[List[float]]] = None,
 ):
     # 1. Instantiate all config objects if not provided
     env_config = env_config or EnvironmentConfig()
@@ -70,16 +66,9 @@ def main_orchestrator(
     # Software (Guidance)
     # The target_radius and mu are needed for the throttle program if it's function-based.
     # These are derived from sim_config and env_config.
-    target_orbit_radius = env_config.earth_radius_m + sim_config.target_orbit_alt_m
-    
-    pitch_program = pitch_program_instance or sw_config.create_pitch_program(env_config)
-    throttle_controller = upper_throttle_program_instance or sw_config.create_throttle_program(target_orbit_radius, env_config.earth_mu)
-    
     guidance = sw_config.create_guidance(
-        pitch_program=pitch_program,
-        throttle_schedule=throttle_controller,
-        booster_throttle_schedule=booster_throttle_schedule_list or sw_config.booster_throttle_program,
         rocket_stages_info=rocket_stages, # Pass stages info to Guidance
+        env_config=env_config
     )
 
     # Rocket instance
