@@ -47,40 +47,46 @@ class RK4(Integrator):
                 return dr_dt, dv_dt, float(dm_dt), s
             raise ValueError(f"deriv_fn must return 3 or 4 values, got {type(out)} with len={getattr(out, '__len__', None)}")
 
+        event_dm_total = 0.0
+
         # k1 at (t, state)
         k1_r, k1_v, k1_m, s_k1_updated = eval_derivs(t, state)
+        event_dm_total += float(s_k1_updated.m) - float(state.m)
 
         # k2 at (t + dt/2, state + dt/2 * k1)
         s2 = state.copy()
         s2.r_eci = state.r_eci + 0.5 * dt * k1_r
         s2.v_eci = state.v_eci + 0.5 * dt * k1_v
-        s2.m = state.m + 0.5 * dt * k1_m
+        s2.m = float(state.m) + event_dm_total + 0.5 * dt * k1_m
         s2.stage_index = s_k1_updated.stage_index
         s2.upper_ignition_start_time = s_k1_updated.upper_ignition_start_time
         k2_r, k2_v, k2_m, s_k2_updated = eval_derivs(t + 0.5 * dt, s2)
+        event_dm_total += float(s_k2_updated.m) - float(s2.m)
 
         # k3 at (t + dt/2, state + dt/2 * k2)
         s3 = state.copy()
         s3.r_eci = state.r_eci + 0.5 * dt * k2_r
         s3.v_eci = state.v_eci + 0.5 * dt * k2_v
-        s3.m = state.m + 0.5 * dt * k2_m
+        s3.m = float(state.m) + event_dm_total + 0.5 * dt * k2_m
         s3.stage_index = s_k2_updated.stage_index
         s3.upper_ignition_start_time = s_k2_updated.upper_ignition_start_time
         k3_r, k3_v, k3_m, s_k3_updated = eval_derivs(t + 0.5 * dt, s3)
+        event_dm_total += float(s_k3_updated.m) - float(s3.m)
 
         # k4 at (t + dt, state + dt * k3)
         s4 = state.copy()
         s4.r_eci = state.r_eci + dt * k3_r
         s4.v_eci = state.v_eci + dt * k3_v
-        s4.m = state.m + dt * k3_m
+        s4.m = float(state.m) + event_dm_total + dt * k3_m
         s4.stage_index = s_k3_updated.stage_index
         s4.upper_ignition_start_time = s_k3_updated.upper_ignition_start_time
         k4_r, k4_v, k4_m, s_k4_updated = eval_derivs(t + dt, s4)
+        event_dm_total += float(s_k4_updated.m) - float(s4.m)
 
         # Combine increments
         r_next = state.r_eci + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
         v_next = state.v_eci + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
-        m_next = state.m + (dt / 6.0) * (k1_m + 2.0 * k2_m + 2.0 * k3_m + k4_m)
+        m_next = float(state.m) + event_dm_total + (dt / 6.0) * (k1_m + 2.0 * k2_m + 2.0 * k3_m + k4_m)
         return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=s_k4_updated.stage_index, upper_ignition_start_time=s_k4_updated.upper_ignition_start_time)
 
 
@@ -123,6 +129,7 @@ class VelocityVerlet(Integrator):
         dr_dt_n, dv_dt_n, dm_dt_n, s_n_updated = eval_derivs(t, state)
         a_n = dv_dt_n
         m_dot_n = dm_dt_n
+        dm_event_n = float(s_n_updated.m) - float(state.m)
 
         # Current values
         r_n = state.r_eci
@@ -133,7 +140,7 @@ class VelocityVerlet(Integrator):
         r_next = r_n + v_n * dt + 0.5 * a_n * dt * dt
 
         # Provisional mass update (explicit Euler for mass)
-        m_next = m_n + m_dot_n * dt
+        m_next = float(m_n) + dm_event_n + m_dot_n * dt
 
         # Provisional velocity for computing a_{n+1}
         v_star = v_n + a_n * dt
@@ -150,12 +157,19 @@ class VelocityVerlet(Integrator):
         # Acceleration at t + dt
         _, dv_dt_np1, _, s_np1_updated = eval_derivs(t + dt, s_prov)
         a_np1 = dv_dt_np1
+        dm_event_np1 = float(s_np1_updated.m) - float(s_prov.m)
 
         # Correct velocity with average acceleration
         v_next = v_n + 0.5 * (a_n + a_np1) * dt
 
         # Use the stage_index and upper_ignition_start_time from the last updated state
-        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=s_np1_updated.stage_index, upper_ignition_start_time=s_np1_updated.upper_ignition_start_time)
+        return State(
+            r_eci=r_next,
+            v_eci=v_next,
+            m=float(m_next) + dm_event_np1,
+            stage_index=s_np1_updated.stage_index,
+            upper_ignition_start_time=s_np1_updated.upper_ignition_start_time,
+        )
 
 
 if __name__ == "__main__":

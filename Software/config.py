@@ -23,6 +23,9 @@ class SoftwareConfig:
     # Pitch Program (Gravity Turn) — time-based, separate booster/upper schedules
     pitch_guidance_mode: str = "parameterized"
     pitch_guidance_function: str = "custom_guidance.simple_pitch_program"
+    # Launch azimuth in degrees from East toward North. Used as the horizontal
+    # reference direction for pitch programs (az=0 is due East).
+    launch_azimuth_deg: float = 0.0
     # Booster pitch schedule (time from liftoff, deg from horizontal)
     # Realistic duration is ~145s, so points beyond that are not useful.
     pitch_program: list = dataclasses.field(

@@ -101,6 +101,7 @@ class StageAwarePitchProgram:
         self.booster_time_points, self.booster_angles_rad = self._prep_schedule(sw_config.pitch_program)
         self.upper_time_points, self.upper_angles_rad = self._prep_schedule(sw_config.upper_pitch_program)
         self.prograde_threshold = sw_config.pitch_prograde_speed_threshold
+        self.launch_azimuth_rad = np.deg2rad(float(getattr(sw_config, "launch_azimuth_deg", 0.0)))
         self.earth_radius = env_config.earth_radius_m
 
     @staticmethod
@@ -120,10 +121,17 @@ class StageAwarePitchProgram:
             return np.array([0.0, 0.0, 1.0], dtype=float)
         r_hat = r / r_norm
 
-        # Define local orientation vectors (up, east)
+        # Define local orientation vectors (up, east, north)
         east = np.cross([0.0, 0.0, 1.0], r_hat)
         east_norm = np.linalg.norm(east)
         east = east / east_norm if east_norm > 0.0 else np.array([1.0, 0.0, 0.0], dtype=float)
+        north = np.cross(r_hat, east)
+        north_norm = np.linalg.norm(north)
+        north = north / north_norm if north_norm > 0.0 else np.array([0.0, 1.0, 0.0], dtype=float)
+
+        horizontal = np.cos(self.launch_azimuth_rad) * east + np.sin(self.launch_azimuth_rad) * north
+        horizontal_norm = np.linalg.norm(horizontal)
+        horizontal = horizontal / horizontal_norm if horizontal_norm > 0.0 else east
 
         idx = 0 if stage_index is None else int(stage_index)
         time_points = self.booster_time_points if idx == 0 else self.upper_time_points
@@ -137,10 +145,10 @@ class StageAwarePitchProgram:
             if speed > self.prograde_threshold:
                 direction = v / speed
             else:
-                direction = east
+                direction = horizontal
         else:
             pitch_rad = np.interp(t_rel, time_points, angle_points)
-            direction = np.cos(pitch_rad) * east + np.sin(pitch_rad) * r_hat
+            direction = np.cos(pitch_rad) * horizontal + np.sin(pitch_rad) * r_hat
 
         n = np.linalg.norm(direction)
         return direction / n if n > 0.0 else r_hat
@@ -337,6 +345,7 @@ def configure_software_for_optimization(
     sw_config.meco_mach = opt_params.meco_mach
     sw_config.separation_delay_s = opt_params.coast_s
     sw_config.upper_ignition_delay_s = opt_params.upper_ignition_delay_s
+    sw_config.launch_azimuth_deg = float(opt_params.azimuth_deg)
 
     return sw_config, sim_config
 
@@ -401,9 +410,6 @@ class Guidance:
         if self.meco_time is not None and t_sim >= self.meco_time:
             return 0.0
         if current_prop_mass <= 0.0:
-            ramp_end = (self.stage_engine_off_complete_time[0] or t_sim) + self.shutdown_ramp_time
-            if t_sim < ramp_end:
-                return max(0.0, 1.0 - (t_sim - (self.stage_engine_off_complete_time[0] or t_sim)) / max(self.shutdown_ramp_time, 1e-9))
             if self.stage_engine_off_complete_time[0] is None:
                 self.stage_engine_off_complete_time[0] = t_sim
             return 0.0
@@ -415,14 +421,13 @@ class Guidance:
             return 0.0
         t_rel_upper = t_sim - self.upper_ignition_start_time
         if current_prop_mass <= 0.0:
-            ramp_end = (self.stage_engine_off_complete_time[1] or t_sim) + self.shutdown_ramp_time
-            if t_sim < ramp_end:
-                return max(0.0, 1.0 - (t_sim - (self.stage_engine_off_complete_time[1] or t_sim)) / max(self.shutdown_ramp_time, 1e-9))
             if self.stage_engine_off_complete_time[1] is None:
                 self.stage_engine_off_complete_time[1] = t_sim
             return 0.0
-        if t_rel_upper < self.upper_engine_ramp_time:
-            return max(0.0, t_rel_upper / self.upper_engine_ramp_time)
+        if self.upper_engine_ramp_time > 0.0 and t_rel_upper < self.upper_engine_ramp_time:
+            ramp = float(np.clip(t_rel_upper / self.upper_engine_ramp_time, 0.0, 1.0))
+            scheduled = float(self.upper_throttle_program(t_sim, state))
+            return ramp * scheduled
         return self.upper_throttle_program(t_sim, state)
 
     def reset(self):

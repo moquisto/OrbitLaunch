@@ -315,13 +315,22 @@ def test_simulation_stage_separation_and_mass_drop():
     state0 = State(r_eci=r0, v_eci=np.zeros(3), m=initial_total_mass, stage_index=0)
 
     with patch.object(guidance, "compute_command") as mock_compute_command:
-        mock_compute_command.return_value = GuidanceCommand(
-            throttle=0.0,
-            thrust_direction_eci=np.array([0.0, 0.0, 1.0]),
-            initiate_stage_separation=True,
-            new_stage_index=1,
-            dry_mass_to_drop=hw_config.booster_dry_mass + rocket.stages[0].prop_mass,
-        )
+        def separation_once(tau: float, s: State, *_args, **_kwargs) -> GuidanceCommand:
+            if int(getattr(s, "stage_index", 0)) == 0:
+                return GuidanceCommand(
+                    throttle=0.0,
+                    thrust_direction_eci=np.array([0.0, 0.0, 1.0]),
+                    initiate_stage_separation=True,
+                    new_stage_index=1,
+                    dry_mass_to_drop=hw_config.booster_dry_mass + rocket.stages[0].prop_mass,
+                )
+            return GuidanceCommand(
+                throttle=0.0,
+                thrust_direction_eci=np.array([0.0, 0.0, 1.0]),
+                initiate_stage_separation=False,
+            )
+
+        mock_compute_command.side_effect = separation_once
         log = sim.run(
             t_env_start=0.0,
             duration=2.0,

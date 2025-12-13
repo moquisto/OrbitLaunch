@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+import os
 
 if TYPE_CHECKING:
     from Main.state import State
@@ -49,8 +50,11 @@ class EventManager:
             # (e.g., if any _last_time variables are stage-specific, though currently they are not)
             # self.rocket.reset_stage_state(state.stage_index) # This would require adding such a method to Rocket
 
-            # Log the event for telemetry (future improvement)
-            print(f"DEBUG: Stage separation initiated, new stage_index={state.stage_index}, mass dropped={guidance_command.dry_mass_to_drop} kg")
+            if os.getenv("ORBITLAUNCH_DEBUG_EVENTS") == "1":
+                print(
+                    f"DEBUG: Stage separation initiated, new stage_index={state.stage_index}, "
+                    f"mass dropped={guidance_command.dry_mass_to_drop} kg"
+                )
 
         # Other events can be added here
         # E.g., if guidance_command.deploy_fairings: ...

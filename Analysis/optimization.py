@@ -43,15 +43,15 @@ from Software.guidance import create_pitch_program_callable, ParameterizedThrott
 from Logging.generate_logs import log_iteration, ensure_log_header, LOG_FILENAME # Import from logging module
 from Analysis.cost_functions import evaluate_simulation_results, PENALTY_CRASH # Import new function and PENALTY_CRASH
 
-print("optimization_twostage.py script started.", flush=True)
-
 # Shared counter for iteration tracking across processes
 global_iter_count = None
+global_log_lock = None
 
-def init_worker(shared_counter):
-    """Initializer for worker processes to share the iteration counter."""
-    global global_iter_count
+def init_worker(shared_counter, log_lock):
+    """Initializer for worker processes to share global state safely."""
+    global global_iter_count, global_log_lock
     global_iter_count = shared_counter
+    global_log_lock = log_lock
 
 class ObjectiveFunctionWrapper:
     def __init__(
@@ -81,7 +81,7 @@ class ObjectiveFunctionWrapper:
         self._span = self._ub - self._lb
 
     def __call__(self, scaled_params: np.ndarray):
-        global global_iter_count
+        global global_iter_count, global_log_lock
         
         # Increment shared counter safely
         current_iter = 0
@@ -109,7 +109,11 @@ class ObjectiveFunctionWrapper:
         )
         
         cost = results.get('cost', PENALTY_CRASH) # Use the cost calculated in the results
-        log_iteration(f"Phase {self.phase}", current_iter, params_obj, results)
+        if global_log_lock is None:
+            log_iteration(f"Phase {self.phase}", current_iter, params_obj, results)
+        else:
+            with global_log_lock:
+                log_iteration(f"Phase {self.phase}", current_iter, params_obj, results)
 
         if self.phase == 1:
             print(
@@ -238,7 +242,16 @@ def run_simulation_wrapper(
 
 
 
-def run_cma_phase(objective_fn_wrapper, bounds, shared_counter, start=None, sigma_scale=0.2, maxiter=200, popsize=None):
+def run_cma_phase(
+    objective_fn_wrapper,
+    bounds,
+    shared_counter,
+    log_lock,
+    start=None,
+    sigma_scale=0.2,
+    maxiter=200,
+    popsize=None,
+):
     """
     Run a CMA-ES loop for a given objective and bounds. Returns the cma result object.
     """
@@ -266,7 +279,7 @@ def run_cma_phase(objective_fn_wrapper, bounds, shared_counter, start=None, sigm
     }
     es = cma.CMAEvolutionStrategy(start.tolist(), sigma0, opts)
 
-    with multiprocessing.Pool(initializer=init_worker, initargs=(shared_counter,)) as pool:
+    with multiprocessing.Pool(initializer=init_worker, initargs=(shared_counter, log_lock)) as pool:
         while not es.stop():
             candidates = es.ask()
             work = [(objective_fn_wrapper, cand) for cand in candidates]
@@ -286,9 +299,11 @@ def run_optimization():
     log_config = LoggingConfig()
     analysis_config = AnalysisConfig()
 
-    # Initialize shared counter
+    # Initialize shared counter and a lock for logging from worker processes.
     global global_iter_count
     global_iter_count = multiprocessing.Value('i', 0)
+    global global_log_lock
+    global_log_lock = multiprocessing.Lock()
 
     # --- Initial Guess & Bounds (SCALED) ---
     # The bounds are now managed centrally in Analysis/config.py
@@ -351,6 +366,7 @@ def run_optimization():
             objective_phase1,
             bounds_unit,
             global_iter_count,
+            global_log_lock,
             start=start_params_unit,
             sigma_scale=0.35,
             maxiter=200,
@@ -402,6 +418,7 @@ def run_optimization():
             objective_phase2,
             tighten_bounds(bounds_unit, best1_unit, margin=0.15),
             global_iter_count,
+            global_log_lock,
             start=best1_unit,
             sigma_scale=0.15,
             maxiter=250,
