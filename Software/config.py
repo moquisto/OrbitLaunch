@@ -27,22 +27,19 @@ class SoftwareConfig:
     # Realistic duration is ~145s, so points beyond that are not useful.
     pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 90.0],     # Clear the pad
-            [30.0, 89.0],    # Minimal tip early
-            [80.0, 85.0],    # Stay lofted through max Q
-            [140.0, 75.0],   # Begin a shallow turn mid-burn
-            [200.0, 60.0],   # Tip further downrange
-            [260.0, 45.0],   # Late booster turn toward horizontal
+            [0.0, 89.8],    # Vertical clear of tower
+            [40.0, 72.0],   # Aggressive turn through lower atmosphere
+            [80.0, 55.0],   # Punch through max Q
+            [120.0, 40.0],  # Stratosphere transition
+            [140.0, 25.0],  # Final moments before MECO
         ]
     )
     # Upper-stage pitch schedule (time from upper ignition, deg from horizontal)
     upper_pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 60.0],    # Start with a higher pitch, more vertical
-            [60.0, 30.0],   # Pitch down more gently
-            [120.0, 10.0],  # Slowly approaching horizontal
-            [240.0, 0.0],   # Delay full prograde until higher altitude
-            [350.0, 0.0],   # Hold prograde
+            [0.0, 60.0],    # Start with a higher pitch
+            [120.0, 10.0],  # Pitch down
+            [240.0, 0.0],   # Delay full prograde
         ]
     )
     pitch_prograde_speed_threshold: float = 1800.0

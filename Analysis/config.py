@@ -2,6 +2,7 @@
 Configuration for analysis and optimization tasks.
 """
 
+import dataclasses
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -49,7 +50,43 @@ class OptimizationParams:
 @dataclass
 class AnalysisConfig:
     # Optimizer (optional manual seed)
-    optimizer_manual_seed: list | None = None
+    optimizer_manual_seed: list | None = dataclasses.field(default_factory=lambda: [
+        6.0,   # meco_mach
+        0.0,   # booster_pitch_time_0
+        89.8,  # booster_pitch_angle_0
+        40.0,  # booster_pitch_time_1
+        72.0,  # booster_pitch_angle_1
+        80.0,  # booster_pitch_time_2
+        55.0,  # booster_pitch_angle_2
+        120.0, # booster_pitch_time_3
+        40.0,  # booster_pitch_angle_3
+        140.0, # booster_pitch_time_4
+        25.0,  # booster_pitch_angle_4
+        2.0,   # coast_s (separation_delay_s)
+        900.0, # upper_burn_s (from upper_throttle_program_schedule)
+        2.0,   # upper_ignition_delay_s
+        0.0,   # azimuth_deg (default)
+        0.0,   # upper_pitch_time_0
+        60.0,  # upper_pitch_angle_0
+        120.0, # upper_pitch_time_1
+        1.0,   # upper_pitch_angle_1
+        240.0, # upper_pitch_time_2
+        0.0,   # upper_pitch_angle_2
+        1.0,   # upper_throttle_level_0
+        1.0,   # upper_throttle_level_1
+        1.0,   # upper_throttle_level_2
+        1.0,   # upper_throttle_level_3
+        0.1,   # upper_throttle_switch_ratio_0
+        0.5,   # upper_throttle_switch_ratio_1
+        0.9,   # upper_throttle_switch_ratio_2
+        1.0,   # booster_throttle_level_0
+        1.0,   # booster_throttle_level_1
+        1.0,   # booster_throttle_level_2
+        1.0,   # booster_throttle_level_3
+        0.1,   # booster_throttle_switch_ratio_0
+        0.5,   # booster_throttle_switch_ratio_1
+        0.9    # booster_throttle_switch_ratio_2
+    ])
 
 @dataclass
 class OptimizationBounds:

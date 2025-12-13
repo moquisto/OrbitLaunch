@@ -145,7 +145,7 @@ def run_simulation_wrapper(params: OptimizationParams, env_config: EnvironmentCo
         initial_mass = state0.m # Capture initial mass after orchestration
 
         # Run full simulation
-        log = sim.run(t0, duration=3000.0, dt=1.0, state0=state0)
+        log = sim.run(t0, duration=10000.0, dt=1.0, state0=state0)
         max_altitude = max(log.altitude) if log.altitude else 0.0 # Get max altitude for evaluation
 
         results = evaluate_simulation_results(log, initial_mass, cfg_env, cfg_sim, max_altitude)
