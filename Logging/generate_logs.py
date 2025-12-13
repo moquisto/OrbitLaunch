@@ -28,6 +28,7 @@ def log_iteration(phase: str, iteration: int, params: OptimizationParams, result
     """Helper to log a single optimizer iteration with de-scaled physics values."""
     if not isinstance(params, OptimizationParams):
         params = OptimizationParams(*params)
+    orbit_error = results.get("orbital_error", results.get("orbit_error", results.get("error", 0.0)))
     with open(LOG_FILENAME, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -52,7 +53,9 @@ def log_iteration(phase: str, iteration: int, params: OptimizationParams, result
             f"{params.booster_throttle_switch_ratio_0:.2f}", f"{params.booster_throttle_switch_ratio_1:.2f}", f"{params.booster_throttle_switch_ratio_2:.2f}",
             f"{results.get('cost', 0.0):.2f}",
             f"{results.get('fuel', 0.0):.2f}",
-            f"{results.get('orbit_error', results.get('error', 0.0)):.2f}",
+            f"{orbit_error:.2f}",
+            f"{results.get('perigee_error_m', 0.0):.2f}",
+            f"{results.get('apoapsis_error_m', 0.0):.2f}",
             results.get('status', 'UNKNOWN')
         ])
 
@@ -77,5 +80,5 @@ def ensure_log_header():
                 "upper_throttle_switch_ratio_0", "upper_throttle_switch_ratio_1", "upper_throttle_switch_ratio_2",
                 "booster_throttle_level_0", "booster_throttle_level_1", "booster_throttle_level_2", "booster_throttle_level_3",
                 "booster_throttle_switch_ratio_0", "booster_throttle_switch_ratio_1", "booster_throttle_switch_ratio_2",
-                "cost", "fuel", "orbit_error", "status",
+                "cost", "fuel", "orbit_error", "perigee_error_m", "apoapsis_error_m", "status",
             ])

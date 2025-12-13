@@ -265,9 +265,10 @@ class Simulation:
                 v_norm = np.linalg.norm(state.v_eci)
                 r_hat = state.r_eci / r_norm
                 vr = float(np.dot(state.v_eci, r_hat))
-                v_circ = np.sqrt(self.earth.mu / self.sim_config.target_orbit_alt_m)
+                target_r = float(self.earth.radius) + float(self.sim_config.target_orbit_alt_m)
+                v_circ = np.sqrt(self.earth.mu / target_r)
                 if (
-                    abs(r_norm - self.sim_config.target_orbit_alt_m) <= self.sim_config.orbit_alt_tol
+                    abs(r_norm - target_r) <= self.sim_config.orbit_alt_tol
                     and abs(v_norm - v_circ) <= self.sim_config.orbit_speed_tol
                     and abs(vr) <= self.sim_config.orbit_radial_tol
                 ):

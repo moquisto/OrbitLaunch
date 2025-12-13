@@ -17,7 +17,7 @@ from Environment.aerodynamics import Aerodynamics
 from Hardware.rocket import Rocket
 from Hardware.engine import Engine # Corrected import
 from Hardware.stage import Stage # Corrected import
-from Software.guidance import StageAwarePitchProgram, ParameterizedThrottleProgram # Import for dummy guidance components
+from Software.guidance import GuidanceCommand, StageAwarePitchProgram, ParameterizedThrottleProgram # Import for dummy guidance components
 from typing import Optional
 
 
@@ -277,18 +277,25 @@ def test_simulation_stage_separation_and_mass_drop():
     atmosphere = DummyAtmosphere(env_config)
     aero = DummyAero(atmosphere=atmosphere, env_config=env_config)
     rocket = build_dummy_rocket(hw_config, env_config)
-    # Manually set up rocket state for separation test
-    rocket.stage_prop_remaining = [5.0, 1.0]
-    # The Guidance object needs to initiate the separation
-    # Mock guidance.compute_command to always initiate separation for this test
-    with patch.object(guidance, 'compute_command') as mock_compute_command:
-        mock_compute_command.return_value = GuidanceCommand(
-            throttle=1.0,
-            thrust_direction_eci=np.array([0, 0, 1]),
-            initiate_stage_separation=True,
-            new_stage_index=1,
-            dry_mass_to_drop=hw_config.booster_dry_mass + rocket.stages[0].prop_mass # Assuming all prop in booster is dropped
-        )
+    # Dummy Guidance components (we'll patch compute_command below).
+    dummy_pitch_program = Mock(spec=StageAwarePitchProgram)
+    dummy_pitch_program.return_value = np.array([0, 0, 1])
+    dummy_upper_throttle_program = Mock(spec=ParameterizedThrottleProgram)
+    dummy_upper_throttle_program.return_value = 0.0
+    dummy_booster_program = Mock(spec=ParameterizedThrottleProgram)
+    dummy_booster_program.return_value = 0.0
+    dummy_rocket_stages_info = [
+        types.SimpleNamespace(dry_mass=hw_config.booster_dry_mass, prop_mass=rocket.stages[0].prop_mass),
+        types.SimpleNamespace(dry_mass=hw_config.upper_dry_mass, prop_mass=rocket.stages[1].prop_mass),
+    ]
+    guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=dummy_pitch_program,
+        upper_throttle_program=dummy_upper_throttle_program,
+        booster_throttle_program=dummy_booster_program,
+        rocket_stages_info=dummy_rocket_stages_info,
+    )
 
     sim = Simulation(
         earth=earth,
@@ -307,12 +314,20 @@ def test_simulation_stage_separation_and_mass_drop():
     initial_total_mass = sum(s.dry_mass + s.prop_mass for s in rocket.stages)
     state0 = State(r_eci=r0, v_eci=np.zeros(3), m=initial_total_mass, stage_index=0)
 
-    log = sim.run(
-        t_env_start=0.0,
-        duration=2.0,
-        dt=1.0,
-        state0=state0,
-    )
+    with patch.object(guidance, "compute_command") as mock_compute_command:
+        mock_compute_command.return_value = GuidanceCommand(
+            throttle=0.0,
+            thrust_direction_eci=np.array([0.0, 0.0, 1.0]),
+            initiate_stage_separation=True,
+            new_stage_index=1,
+            dry_mass_to_drop=hw_config.booster_dry_mass + rocket.stages[0].prop_mass,
+        )
+        log = sim.run(
+            t_env_start=0.0,
+            duration=2.0,
+            dt=1.0,
+            state0=state0,
+        )
 
     assert max(log.stage) == 1
     # Expected remaining mass after booster separation (booster dry mass + prop, upper stage dry + prop)
@@ -320,4 +335,3 @@ def test_simulation_stage_separation_and_mass_drop():
     # So initial_total_mass - (booster dry + booster prop) = (upper dry + upper prop)
     expected_remaining_mass = rocket.stages[1].dry_mass + rocket.stages[1].prop_mass
     assert np.isclose(min(log.m), expected_remaining_mass, atol=1e-6)
-

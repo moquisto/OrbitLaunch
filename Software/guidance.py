@@ -178,7 +178,9 @@ class ParameterizedThrottleProgram:
 def create_throttle_schedule_from_ratios(
     burn_duration: float,
     throttle_levels: np.ndarray,
-    switch_ratios: np.ndarray
+    switch_ratios: np.ndarray,
+    *,
+    shutdown_after_burn: bool = True,
 ) -> List[List[float]]:
     """
     Constructs a step-function throttle schedule from throttle levels and switch ratios.
@@ -242,8 +244,12 @@ def create_throttle_schedule_from_ratios(
               # A more complex scenario might require trimming or an error.
               pass # For now, let it be - the ParameterizedThrottleProgram will handle interpolation
 
-    # After burn_duration, throttle goes to 0
-    schedule.append([burn_duration + 1.0, 0.0]) # Add a point slightly after burn_duration to ensure throttle goes to 0
+    if shutdown_after_burn:
+        # After burn_duration, throttle goes to 0.
+        schedule.append([burn_duration + 1.0, 0.0])
+    else:
+        # Hold the final level effectively "forever"; guidance will handle MECO.
+        schedule.append([1e9, throttle_levels[level_idx]])
 
     return schedule
 
@@ -288,13 +294,15 @@ def configure_software_for_optimization(
         opt_params.upper_throttle_switch_ratio_2
     ])
     
-    # Placeholder for upper stage burn duration - needs to be optimized or determined dynamically
-    upper_burn_duration_proxy = sim_config.main_duration_s * 0.5 
+    # Use the optimized burn duration so phase 2 can actually minimize fuel by
+    # cutting off early (leaving propellant unburned).
+    upper_burn_duration = max(1.0, float(opt_params.upper_burn_s))
 
     upper_throttle_program_schedule = create_throttle_schedule_from_ratios(
-        burn_duration=upper_burn_duration_proxy, 
+        burn_duration=upper_burn_duration,
         throttle_levels=upper_throttle_levels,
-        switch_ratios=upper_throttle_switch_ratios
+        switch_ratios=upper_throttle_switch_ratios,
+        shutdown_after_burn=True,
     )
 
     # Throttle program (booster)
@@ -310,13 +318,15 @@ def configure_software_for_optimization(
         opt_params.booster_throttle_switch_ratio_2
     ])
     
-    # Placeholder for booster burn duration - this will be refined later
-    booster_burn_duration_proxy = sim_config.main_duration_s * 0.1 
+    # Use an ascent-time scale so switch ratios happen during the booster burn.
+    # The booster throttle program should not enforce shutdown; MECO is handled by guidance.
+    booster_burn_duration_est = max(10.0, float(opt_params.booster_pitch_time_4))
 
     booster_throttle_program_schedule = create_throttle_schedule_from_ratios(
-        burn_duration=booster_burn_duration_proxy,
+        burn_duration=booster_burn_duration_est,
         throttle_levels=booster_throttle_levels,
-        switch_ratios=booster_throttle_switch_ratios
+        switch_ratios=booster_throttle_switch_ratios,
+        shutdown_after_burn=False,
     )
 
     # Apply de-scaled parameters to sw_config and sim_config
@@ -328,14 +338,6 @@ def configure_software_for_optimization(
     sw_config.separation_delay_s = opt_params.coast_s
     sw_config.upper_ignition_delay_s = opt_params.upper_ignition_delay_s
 
-    # This should be handled by the optimization process itself, not hardcoded scaling
-    # The optimization is already working with orbit_altitude_factor, but the sim_config target
-    # should directly come from the optimization result if it were to be directly used.
-    # For now, let's assume opt_params.orbit_altitude_factor directly represents the target altitude or a scaled version of it.
-    # This also depends on the actual OptimizationParams definition in Analysis/config.py, which doesn't seem to have orbit_altitude_factor.
-    # Let's temporarily remove this line and re-evaluate the target_orbit_altitude_m later.
-    # sim_config.target_orbit_altitude_m = opt_params.orbit_altitude_factor * env_config.earth_radius_m * 2 # Placeholder scaling factor
-    
     return sw_config, sim_config
 
 from dataclasses import dataclass

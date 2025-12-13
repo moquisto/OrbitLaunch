@@ -22,7 +22,7 @@ class Integrator:
 class RK4(Integrator):
     def step(
         self,
-        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float, State]], # Updated type hint
+        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float] | Tuple[np.ndarray, np.ndarray, float, State]],
         state: State,
         t: float,
         dt: float,
@@ -37,8 +37,18 @@ class RK4(Integrator):
             dm_dt: float             = mass rate [kg/s]
             updated_state: State     = State object after event application
         """
+        def eval_derivs(tau: float, s: State) -> tuple[np.ndarray, np.ndarray, float, State]:
+            out = deriv_fn(tau, s)
+            if isinstance(out, tuple) and len(out) == 4:
+                dr_dt, dv_dt, dm_dt, updated_state = out
+                return dr_dt, dv_dt, float(dm_dt), updated_state
+            if isinstance(out, tuple) and len(out) == 3:
+                dr_dt, dv_dt, dm_dt = out
+                return dr_dt, dv_dt, float(dm_dt), s
+            raise ValueError(f"deriv_fn must return 3 or 4 values, got {type(out)} with len={getattr(out, '__len__', None)}")
+
         # k1 at (t, state)
-        k1_r, k1_v, k1_m, s_k1_updated = deriv_fn(t, state) # Capture updated state
+        k1_r, k1_v, k1_m, s_k1_updated = eval_derivs(t, state)
 
         # k2 at (t + dt/2, state + dt/2 * k1)
         s2 = state.copy()
@@ -47,7 +57,7 @@ class RK4(Integrator):
         s2.m = state.m + 0.5 * dt * k1_m
         s2.stage_index = s_k1_updated.stage_index
         s2.upper_ignition_start_time = s_k1_updated.upper_ignition_start_time
-        k2_r, k2_v, k2_m, s_k2_updated = deriv_fn(t + 0.5 * dt, s2)
+        k2_r, k2_v, k2_m, s_k2_updated = eval_derivs(t + 0.5 * dt, s2)
 
         # k3 at (t + dt/2, state + dt/2 * k2)
         s3 = state.copy()
@@ -56,7 +66,7 @@ class RK4(Integrator):
         s3.m = state.m + 0.5 * dt * k2_m
         s3.stage_index = s_k2_updated.stage_index
         s3.upper_ignition_start_time = s_k2_updated.upper_ignition_start_time
-        k3_r, k3_v, k3_m, s_k3_updated = deriv_fn(t + 0.5 * dt, s3)
+        k3_r, k3_v, k3_m, s_k3_updated = eval_derivs(t + 0.5 * dt, s3)
 
         # k4 at (t + dt, state + dt * k3)
         s4 = state.copy()
@@ -65,7 +75,7 @@ class RK4(Integrator):
         s4.m = state.m + dt * k3_m
         s4.stage_index = s_k3_updated.stage_index
         s4.upper_ignition_start_time = s_k3_updated.upper_ignition_start_time
-        k4_r, k4_v, k4_m, s_k4_updated = deriv_fn(t + dt, s4)
+        k4_r, k4_v, k4_m, s_k4_updated = eval_derivs(t + dt, s4)
 
         # Combine increments
         r_next = state.r_eci + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
@@ -77,7 +87,7 @@ class RK4(Integrator):
 class VelocityVerlet(Integrator):
     def step(
         self,
-        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float, State]], # Updated type hint
+        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float] | Tuple[np.ndarray, np.ndarray, float, State]],
         state: State,
         t: float,
         dt: float,
@@ -99,8 +109,18 @@ class VelocityVerlet(Integrator):
         This assumes dm/dt varies slowly over a single time step, which is
         reasonable for standard rocket engines with small dt.
         """
+        def eval_derivs(tau: float, s: State) -> tuple[np.ndarray, np.ndarray, float, State]:
+            out = deriv_fn(tau, s)
+            if isinstance(out, tuple) and len(out) == 4:
+                dr_dt, dv_dt, dm_dt, updated_state = out
+                return dr_dt, dv_dt, float(dm_dt), updated_state
+            if isinstance(out, tuple) and len(out) == 3:
+                dr_dt, dv_dt, dm_dt = out
+                return dr_dt, dv_dt, float(dm_dt), s
+            raise ValueError(f"deriv_fn must return 3 or 4 values, got {type(out)} with len={getattr(out, '__len__', None)}")
+
         # Evaluate derivatives at the beginning of the step
-        dr_dt_n, dv_dt_n, dm_dt_n, s_n_updated = deriv_fn(t, state) # Capture updated state
+        dr_dt_n, dv_dt_n, dm_dt_n, s_n_updated = eval_derivs(t, state)
         a_n = dv_dt_n
         m_dot_n = dm_dt_n
 
@@ -128,7 +148,7 @@ class VelocityVerlet(Integrator):
         s_prov.upper_ignition_start_time = s_n_updated.upper_ignition_start_time
 
         # Acceleration at t + dt
-        _, dv_dt_np1, _, s_np1_updated = deriv_fn(t + dt, s_prov) # Capture updated state
+        _, dv_dt_np1, _, s_np1_updated = eval_derivs(t + dt, s_prov)
         a_np1 = dv_dt_np1
 
         # Correct velocity with average acceleration

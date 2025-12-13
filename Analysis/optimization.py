@@ -1,3 +1,4 @@
+# Last modified: 2025-12-13 11:54:18.000000
 try:
     import cma
     CMA_AVAILABLE = True
@@ -13,6 +14,16 @@ Phase 2: "Optimizing" - From that valid orbit, minimize fuel usage while staying
 
 This version incorporates input scaling, coarse-to-fine simulation, and detailed logging.
 """
+import sys
+from pathlib import Path
+
+# Allow running this file directly (e.g. `python3 Analysis/optimization.py`) by
+# ensuring the repo root is on sys.path so `import main` works.
+if __package__ in (None, ""):
+    _repo_root = Path(__file__).resolve().parents[1]
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+
 import multiprocessing
 import copy
 import traceback
@@ -30,7 +41,7 @@ from Logging.config import LoggingConfig
 from Analysis.config import AnalysisConfig, OptimizationParams, OptimizationBounds # Import OptimizationBounds
 from Software.guidance import create_pitch_program_callable, ParameterizedThrottleProgram, configure_software_for_optimization
 from Logging.generate_logs import log_iteration, ensure_log_header, LOG_FILENAME # Import from logging module
-from Analysis.cost_functions import evaluate_simulation_results, PENALTY_CRASH, TARGET_TOLERANCE_M # Import new function, PENALTY_CRASH, and TARGET_TOLERANCE_M
+from Analysis.cost_functions import evaluate_simulation_results, PENALTY_CRASH # Import new function and PENALTY_CRASH
 
 print("optimization_twostage.py script started.", flush=True)
 
@@ -43,7 +54,19 @@ def init_worker(shared_counter):
     global_iter_count = shared_counter
 
 class ObjectiveFunctionWrapper:
-    def __init__(self, phase, env_config, hw_config, sw_config, sim_config, log_config, analysis_config, bounds):
+    def __init__(
+        self,
+        phase,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config,
+        analysis_config,
+        bounds,
+        *,
+        param_space: str = "physical",
+    ):
         self.phase = phase
         self.env_config = env_config
         self.hw_config = hw_config
@@ -52,6 +75,10 @@ class ObjectiveFunctionWrapper:
         self.log_config = log_config
         self.analysis_config = analysis_config
         self.bounds = bounds
+        self.param_space = param_space
+        self._lb = np.array([b[0] for b in bounds], dtype=float)
+        self._ub = np.array([b[1] for b in bounds], dtype=float)
+        self._span = self._ub - self._lb
 
     def __call__(self, scaled_params: np.ndarray):
         global global_iter_count
@@ -63,42 +90,41 @@ class ObjectiveFunctionWrapper:
                 global_iter_count.value += 1
                 current_iter = global_iter_count.value
         
-        params_obj = OptimizationParams(*scaled_params)
+        raw_params = np.asarray(scaled_params, dtype=float)
+        if self.param_space == "unit":
+            unit_params = np.clip(raw_params, 0.0, 1.0)
+            phys_params = self._lb + unit_params * self._span
+        else:
+            phys_params = raw_params
+
+        params_obj = OptimizationParams(*phys_params.tolist())
         results = run_simulation_wrapper(
             params_obj,
             self.env_config,
             self.hw_config,
             self.sw_config,
             self.sim_config,
-            self.log_config
+            self.log_config,
+            self.phase  # Pass phase to the wrapper
         )
         
+        cost = results.get('cost', PENALTY_CRASH) # Use the cost calculated in the results
+        log_iteration(f"Phase {self.phase}", current_iter, params_obj, results)
+
         if self.phase == 1:
-            results['cost'] = results['error']
-            bound_penalty = soft_bounds_penalty(scaled_params, self.bounds)
-            results['cost'] += bound_penalty
-
-            log_iteration("Phase 1", current_iter, params_obj, results)
             print(
-                f"[Phase 1] Iter {current_iter:3d} | Error: {results['error']/1000:.1f} km | Status: {results['status']}", flush=True)
+                f"[Phase 1] Iter {current_iter:3d} | Cost: {cost:.1f} | Status: {results['status']}", 
+                flush=True
+            )
+        else: # Phase 2
+            fuel = results.get('fuel', 0)
+            error = results.get('orbital_error', 0)
+            print(
+                f"[Phase 2] Iter {current_iter:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", 
+                flush=True
+            )
 
-            return results['cost']
-        else:
-            fuel, error = results["fuel"], results["error"]
-            if error > TARGET_TOLERANCE_M: # Uses the TARGET_TOLERANCE_M constant
-                penalty = (error - TARGET_TOLERANCE_M) * 10.0
-                cost = fuel + penalty
-            else:
-                cost = fuel
-            
-            bound_penalty = soft_bounds_penalty(scaled_params, self.bounds)
-            cost += bound_penalty
-            results['cost'] = cost
-
-            log_iteration("Phase 2", current_iter, params_obj, results)
-            print(f"[Phase 2] Iter {current_iter:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", flush=True)
-
-            return cost
+        return cost
 
 
 
@@ -111,7 +137,18 @@ def _evaluate_candidate(args):
         print(f"[CMA worker] candidate failed: {exc}", flush=True)
         return float(PENALTY_CRASH) # Ensure return type is float
 
-def run_simulation_wrapper(params: OptimizationParams, env_config: EnvironmentConfig, hw_config: HardwareConfig, sw_config: SoftwareConfig, sim_config: SimulationConfig, log_config: LoggingConfig):
+def run_simulation_wrapper(
+    params: OptimizationParams,
+    env_config: EnvironmentConfig,
+    hw_config: HardwareConfig,
+    sw_config: SoftwareConfig,
+    sim_config: SimulationConfig,
+    log_config: LoggingConfig,
+    phase: int,
+    *,
+    dt_s: float | None = None,
+    duration_s: float | None = None,
+):
     """
     Runs the simulation with a structured parameter object.
     This function de-scales parameters into real physics units for the simulation
@@ -131,8 +168,32 @@ def run_simulation_wrapper(params: OptimizationParams, env_config: EnvironmentCo
 
     cfg_sw, cfg_sim = configure_software_for_optimization(params, cfg_sw, cfg_sim, cfg_env)
 
+    # Use a phase-dependent simulation fidelity: phase 1 can be coarser, phase 2
+    # should be finer to make fuel comparisons meaningful.
+    if phase == 1:
+        cfg_sim.main_dt_s = 0.5
+    else:
+        cfg_sim.main_dt_s = 0.25
+
+    # Simulate long enough to include the full burn program and a short coast so
+    # orbital elements are evaluated after cutoff, without relying on "exit on orbit"
+    # (which can otherwise stop mid-burn and bias fuel usage downward).
+    burn_and_coast = (
+        float(params.upper_burn_s)
+        + float(params.coast_s)
+        + float(params.upper_ignition_delay_s)
+        + 700.0
+    )
+    cfg_sim.main_duration_s = float(np.clip(burn_and_coast, 800.0, 6000.0))
+
+    # Allow callers (e.g., final evaluation) to override fidelity.
+    if dt_s is not None:
+        cfg_sim.main_dt_s = float(dt_s)
+    if duration_s is not None:
+        cfg_sim.main_duration_s = float(duration_s)
+
     # Initialize results with a default "CRASH" status in case the simulation fails early
-    results = {"fuel": 0.0, "error": PENALTY_CRASH, "status": "INIT", "cost": PENALTY_CRASH}
+    results = {"fuel": 0.0, "status": "INIT", "cost": PENALTY_CRASH}
     
     try:
         sim, state0, t0, _log_config, _analysis_config = main_orchestrator(
@@ -144,33 +205,38 @@ def run_simulation_wrapper(params: OptimizationParams, env_config: EnvironmentCo
         )
         initial_mass = state0.m # Capture initial mass after orchestration
 
-        # Run full simulation
-        log = sim.run(t0, duration=10000.0, dt=1.0, state0=state0)
+        # Run simulation (dt/duration tuned above)
+        log = sim.run(t0, duration=float(cfg_sim.main_duration_s), dt=float(cfg_sim.main_dt_s), state0=state0)
         max_altitude = max(log.altitude) if log.altitude else 0.0 # Get max altitude for evaluation
 
-        results = evaluate_simulation_results(log, initial_mass, cfg_env, cfg_sim, max_altitude)
+        results = evaluate_simulation_results(log, initial_mass, cfg_env, cfg_sim, max_altitude, phase)
 
     except IndexError:
         results["status"] = "SIM_FAIL_INDEX"
-        results["error"] = PENALTY_CRASH
     except Exception:
         results["status"] = "SIM_FAIL_UNKNOWN"
-        results["error"] = PENALTY_CRASH
         print(f"Simulation wrapper encountered an unexpected error: {traceback.format_exc()}", flush=True) # Added more detailed error logging
-    finally:
-        results["orbit_error"] = results.get("error", PENALTY_CRASH)
+    
+    # Ensure cost is present in results, even in failure cases not caught by evaluate_simulation_results
+    if 'cost' not in results:
+        # This will use the new calculate_cost function via evaluate_simulation_results
+        # but we need to ensure it's called even if an early exception happens.
+        # For simplicity, let's just assign a penalty. A more robust way would be to
+        # call `calculate_cost` here, but that requires more inputs.
+        # The refactored `evaluate_simulation_results` should handle this.
+        # Let's check if the status provides enough info.
+        if results['status'] in ["SIM_FAIL_INDEX", "SIM_FAIL_UNKNOWN"]:
+            from Analysis.cost_functions import calculate_cost
+            # We pass a minimal results dictionary to the cost function
+            results['cost'] = calculate_cost(
+                results, phase, sim_config.target_orbit_alt_m, env_config.earth_radius_m
+            )
+        else:
+            results['cost'] = PENALTY_CRASH
 
     return results
 
-def soft_bounds_penalty(scaled_params, bounds):
-    penalty = 0.0
-    for i, param in enumerate(scaled_params):
-        lower, upper = bounds[i]
-        if param < lower:
-            penalty += (lower - param) * 1e5  # Large penalty for going below lower bound
-        elif param > upper:
-            penalty += (param - upper) * 1e5  # Large penalty for going above upper bound
-    return penalty
+
 
 def run_cma_phase(objective_fn_wrapper, bounds, shared_counter, start=None, sigma_scale=0.2, maxiter=200, popsize=None):
     """
@@ -194,7 +260,9 @@ def run_cma_phase(objective_fn_wrapper, bounds, shared_counter, start=None, sigm
         "maxiter": maxiter,
         "popsize": popsize or default_popsize,
         "verb_disp": 1,
-        "CMA_diagonal": True,  # faster early iterations
+        # Start diagonal for speed, then allow correlations to be learned.
+        "CMA_diagonal": 30,
+        "CMA_active": True,
     }
     es = cma.CMAEvolutionStrategy(start.tolist(), sigma0, opts)
 
@@ -224,7 +292,19 @@ def run_optimization():
 
     # --- Initial Guess & Bounds (SCALED) ---
     # The bounds are now managed centrally in Analysis/config.py
-    bounds = OptimizationBounds.get_bounds()
+    bounds_phys = OptimizationBounds.get_bounds()
+    bounds_unit = [(0.0, 1.0)] * len(bounds_phys)
+    lb_phys = np.array([b[0] for b in bounds_phys], dtype=float)
+    ub_phys = np.array([b[1] for b in bounds_phys], dtype=float)
+    span_phys = ub_phys - lb_phys
+    span_phys = np.where(span_phys == 0.0, 1.0, span_phys)
+
+    def to_unit(x_phys: np.ndarray) -> np.ndarray:
+        return (np.asarray(x_phys, dtype=float) - lb_phys) / span_phys
+
+    def from_unit(x_unit: np.ndarray) -> np.ndarray:
+        u = np.asarray(x_unit, dtype=float)
+        return lb_phys + np.clip(u, 0.0, 1.0) * span_phys
 
     def tighten_bounds(bounds_in, seed, margin=0.2):
         tightened = []
@@ -237,24 +317,21 @@ def run_optimization():
             tightened.append((new_lo, new_hi))
         return tightened
 
-    # Build start params either from manual seed or config-derived defaults.
     if analysis_config.optimizer_manual_seed and len(analysis_config.optimizer_manual_seed) == 35:
-        start_params = np.array(analysis_config.optimizer_manual_seed, dtype=float)
-        bounds = tighten_bounds(bounds, start_params, margin=0.2)
+        start_params_phys = np.array(analysis_config.optimizer_manual_seed, dtype=float)
     else:
-        start_params = (
-            np.array([b[0] for b in bounds], dtype=float) + np.array([b[1] for b in bounds], dtype=float)
-        ) / 2.0
+        start_params_phys = (lb_phys + ub_phys) / 2.0
 
     ensure_log_header()
     print(f"=== PHASE 1: TARGETING ORBIT (Logging to {LOG_FILENAME}) ===", flush=True)
     with global_iter_count.get_lock():
         global_iter_count.value = 0
-
+    
+    
     # Ensure seed respects the active bounds to avoid CMA boundary errors.
-    lb = np.array([b[0] for b in bounds], dtype=float)
-    ub = np.array([b[1] for b in bounds], dtype=float)
-    start_params = np.clip(start_params, lb, ub)
+    # Clip seed to physical bounds, then map into unit space for better conditioning.
+    start_params_phys = np.clip(start_params_phys, lb_phys, ub_phys)
+    start_params_unit = np.clip(to_unit(start_params_phys), 0.0, 1.0)
     
     objective_phase1 = ObjectiveFunctionWrapper(
         phase=1,
@@ -264,24 +341,35 @@ def run_optimization():
         sim_config=sim_config,
         log_config=log_config,
         analysis_config=analysis_config,
-        bounds=bounds
+        bounds=bounds_phys,
+        param_space="unit",
     )
 
     if CMA_AVAILABLE:
         print("Using CMA-ES for Phase 1", flush=True)
-        res1 = run_cma_phase(objective_phase1, bounds, global_iter_count, start=start_params, sigma_scale=0.15, maxiter=120, popsize=14)
-        best1 = res1.xbest
+        res1 = run_cma_phase(
+            objective_phase1,
+            bounds_unit,
+            global_iter_count,
+            start=start_params_unit,
+            sigma_scale=0.35,
+            maxiter=200,
+            popsize=24,
+        )
+        best1_unit = res1.xbest
         best1_cost = res1.fbest
     else:
         print("CMA-ES not available, falling back to Differential Evolution for Phase 1", flush=True)
         res = differential_evolution(
             objective_phase1,
-            bounds,
-            maxiter=300,
+            bounds_unit,
+            maxiter=200,
             disp=True
         )
-        best1 = res.x
+        best1_unit = res.x
         best1_cost = res.fun
+
+    best1 = from_unit(best1_unit)
 
     print(f"\n--- Phase 1 Complete ---", flush=True)
     print(f"Best Error/Cost: {best1_cost/1000:.1f} km", flush=True)
@@ -294,7 +382,8 @@ def run_optimization():
     print("\n=== PHASE 2: MINIMIZING FUEL (CMA-ES if available) ===", flush=True)
     with global_iter_count.get_lock():
         global_iter_count.value = 0  # Reset for phase 2 logging
-
+    
+    
     objective_phase2 = ObjectiveFunctionWrapper(
         phase=2,
         env_config=env_config,
@@ -303,46 +392,50 @@ def run_optimization():
         sim_config=sim_config,
         log_config=log_config,
         analysis_config=analysis_config,
-        bounds=bounds
+        bounds=bounds_phys,
+        param_space="unit",
     )
 
     if CMA_AVAILABLE:
         # Seed phase 2 from phase 1 best with a smaller sigma to focus search.
         res2 = run_cma_phase(
             objective_phase2,
-            bounds,
+            tighten_bounds(bounds_unit, best1_unit, margin=0.15),
             global_iter_count,
-            start=best1,
-            sigma_scale=0.1,
-            maxiter=120,
-            popsize=14
+            start=best1_unit,
+            sigma_scale=0.15,
+            maxiter=250,
+            popsize=24,
         )
-        best2 = res2.xbest
+        best2_unit = res2.xbest
         best2_cost = res2.fbest
     else:
         res = differential_evolution(
             objective_phase2,
-            bounds,
-            maxiter=300,
+            bounds_unit,
+            maxiter=250,
             disp=True
         )
-        best2 = res.x
+        best2_unit = res.x
         best2_cost = res.fun
 
     print("\n=== OPTIMIZATION COMPLETE ===", flush=True)
-    final_params2 = best2
-    # Run one last time for final numbers
+    final_params2 = from_unit(best2_unit)
+    # Run one last time for final numbers on a finer timestep for a more
+    # trustworthy fuel figure.
     final_results = run_simulation_wrapper(
         final_params2,
         env_config,
         hw_config,
         sw_config,
         sim_config,
-        log_config
+        log_config,
+        phase=2,  # Explicitly use phase 2 for final evaluation
+        dt_s=sim_config.main_dt_s,
     )
 
     print(f"Final Fuel Used: {final_results['fuel']:.1f} kg", flush=True)
-    print(f"Final Orbit Error: {final_results['error']/1000:.1f} km", flush=True)
+    print(f"Final Orbit Error: {final_results['orbital_error']/1000:.1f} km", flush=True)
     print(f"Optimal Parameters (summary): Mach={final_params2[0]:.2f}, Coast={final_params2[11]:.1f}s, Upper Burn={final_params2[12]:.1f}s. Full details in {LOG_FILENAME}", flush=True)
 
 

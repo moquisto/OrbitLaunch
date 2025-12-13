@@ -3,15 +3,13 @@ import pytest
 from unittest.mock import Mock, patch
 
 from Analysis.config import AnalysisConfig, OptimizationParams # Import OptimizationParams as well
-from Environment.gravity import orbital_elements_from_state
-from Software.guidance import ParameterizedThrottleProgram # Corrected import path
 from Environment.config import EnvironmentConfig
 from Hardware.config import HardwareConfig
 from Software.config import SoftwareConfig
 from Main.config import SimulationConfig
 from Logging.config import LoggingConfig
-from Analysis.optimization import ObjectiveFunctionWrapper, run_simulation_wrapper, soft_bounds_penalty
-from Analysis.cost_functions import PENALTY_CRASH, TARGET_TOLERANCE_M
+from Analysis.optimization import ObjectiveFunctionWrapper, run_simulation_wrapper
+from Analysis.cost_functions import PENALTY_CRASH, TARGET_TOLERANCE_M, evaluate_simulation_results
 
 @pytest.fixture
 def configs():
@@ -147,7 +145,7 @@ def test_run_simulation_wrapper_successful_orbit(mock_build_simulation_success, 
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
-    results = run_simulation_wrapper(scaled_params, env_config, hw_config, sw_config, sim_config, log_config)
+    results = run_simulation_wrapper(scaled_params, env_config, hw_config, sw_config, sim_config, log_config, phase=1)
     
     mock_build.assert_called_once()
     assert mock_sim.run.call_count >= 1
@@ -165,7 +163,7 @@ def test_run_simulation_wrapper_crash_scenario(mock_build_simulation_crash, conf
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
     ]
     
-    results = run_simulation_wrapper(scaled_params, env_config, hw_config, sw_config, sim_config, log_config)
+    results = run_simulation_wrapper(scaled_params, env_config, hw_config, sw_config, sim_config, log_config, phase=1)
     
     mock_build.assert_called_once()
     assert mock_sim.run.call_count >= 1
@@ -175,7 +173,7 @@ def test_run_simulation_wrapper_crash_scenario(mock_build_simulation_crash, conf
 def test_objective_phase1_success(mock_build_simulation_success, configs):
     env_config, hw_config, sw_config, sim_config, log_config, analysis_config = configs
     with patch('Analysis.optimization.run_simulation_wrapper') as mock_run_sim:
-        mock_run_sim.return_value = {"error": 200.0, "fuel": 10000.0, "status": "PERFECT"}
+        mock_run_sim.return_value = {"cost": 200.0, "orbital_error": 200.0, "fuel": 10000.0, "status": "PERFECT"}
         objective = ObjectiveFunctionWrapper(
             phase=1, 
             env_config=env_config, 
@@ -193,7 +191,7 @@ def test_objective_phase1_success(mock_build_simulation_success, configs):
 def test_objective_phase2_success(mock_build_simulation_success, configs):
     env_config, hw_config, sw_config, sim_config, log_config, analysis_config = configs
     with patch('Analysis.optimization.run_simulation_wrapper') as mock_run_sim:
-        mock_run_sim.return_value = {"error": 200.0, "fuel": 10000.0, "status": "PERFECT"}
+        mock_run_sim.return_value = {"cost": 10000.0, "orbital_error": 0.0, "fuel": 10000.0, "status": "PERFECT"}
         objective = ObjectiveFunctionWrapper(
             phase=2, 
             env_config=env_config, 
@@ -207,3 +205,29 @@ def test_objective_phase2_success(mock_build_simulation_success, configs):
         scaled_params = np.zeros(35)
         cost = objective(scaled_params)
         assert cost == pytest.approx(10000.0)
+
+
+def test_fuel_metric_ignores_stage_mass_drop(configs, mock_orbital_elements_success):
+    env_config, hw_config, sw_config, sim_config, log_config, analysis_config = configs
+
+    class MockLog:
+        def __init__(self):
+            self.t_sim = [0.0, 1.0, 2.0]
+            self.mdot = [-10.0, -10.0, -10.0]  # 10 kg/s burn over 2 s => 20 kg burned
+            self.m = [100.0, 90.0, 30.0]  # includes a big discrete mass drop
+            self.r = [np.zeros(3), np.zeros(3), np.array([env_config.earth_radius_m + 420_000.0, 0.0, 0.0])]
+            self.v = [np.zeros(3), np.zeros(3), np.array([0.0, 7_700.0, 0.0])]
+
+    log = MockLog()
+    with patch("Analysis.cost_functions.orbital_elements_from_state") as mock_oe:
+        mock_oe.return_value = mock_orbital_elements_success
+        results = evaluate_simulation_results(
+            log=log,
+            initial_mass=100.0,
+            cfg_env=env_config,
+            sim_config=sim_config,
+            max_altitude=420_000.0,
+            phase=2,
+        )
+
+    assert results["fuel"] == pytest.approx(20.0)

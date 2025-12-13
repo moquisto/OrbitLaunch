@@ -112,8 +112,8 @@ class OptimizationBounds:
             (110.0, 150.0),   # 9: pitch_time_4 (s) - Final moments before MECO
             (0.0, 20.0),      # 10: pitch_angle_4 (deg)
             # Staging and upper stage burn
-            (5.0, 200.0),    # 11: Coast duration after MECO (s)
-            (100.0, 300.0),  # 12: Upper stage burn duration (s)
+            (0.0, 30.0),     # 11: Coast duration after MECO (s)
+            (50.0, 1500.0),  # 12: Upper stage burn duration (s)
             (0.0, 60.0),     # 13: Upper stage ignition delay after separation (s)
             (-15.0, 15.0),   # 14: Azimuth heading (deg from east toward north)
             # Upper-stage pitch profile (time from upper ignition, deg from horizontal)
