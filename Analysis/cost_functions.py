@@ -152,7 +152,12 @@ def evaluate_simulation_results(
     dict
         A dictionary containing key performance indicators from the simulation.
     """
-    results = {"fuel": 0.0, "status": "INIT", "max_altitude": float(max_altitude)}
+    results = {
+        "fuel": 0.0,
+        "status": "INIT",
+        "max_altitude": float(max_altitude),
+        "cutoff_reason": str(getattr(log, "cutoff_reason", "") or ""),
+    }
 
     if not log.t_sim or len(log.t_sim) == 0:
         results["status"] = "SIM_FAIL_NO_DATA"
