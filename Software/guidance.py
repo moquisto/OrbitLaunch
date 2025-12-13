@@ -440,8 +440,6 @@ class Guidance:
         self._last_t_sim = t_sim
 
         current_stage_idx = getattr(state, "stage_index", 0)
-        if current_stage_idx == 0 and t_sim < 1000.0: # Print for first 1000s of booster flight
-            print(f"DEBUG_BOOSTER_MACH: t_sim={t_sim:.2f}s, Stage={current_stage_idx}, Mach={mach:.2f}")
         # Keep the state's ignition timestamp in sync with the internal schedule so
         # throttle programs that read from the State can find it.
         if self.upper_ignition_start_time is not None and state.upper_ignition_start_time is None:
