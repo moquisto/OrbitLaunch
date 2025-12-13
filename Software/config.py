@@ -27,23 +27,25 @@ class SoftwareConfig:
     # Realistic duration is ~145s, so points beyond that are not useful.
     pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 89.8],    # Vertical clear of tower
-            [10.0, 86.0],   # Initiate kick early
-            [40.0, 72.0],   # Aggressive turn through lower atmosphere
-            [80.0, 55.0],   # Punch through max Q
-            [120.0, 40.0],  # Stratosphere transition
-            [140.0, 25.0],  # Final moments before MECO
+            [0.0, 90.0],     # Clear the pad
+            [30.0, 89.0],    # Minimal tip early
+            [80.0, 85.0],    # Stay lofted through max Q
+            [140.0, 75.0],   # Begin a shallow turn mid-burn
+            [200.0, 60.0],   # Tip further downrange
+            [260.0, 45.0],   # Late booster turn toward horizontal
         ]
     )
     # Upper-stage pitch schedule (time from upper ignition, deg from horizontal)
     upper_pitch_program: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 10.0],   # Gentle initial pitch up to preserve altitude
-            [60.0, 0.0],   # Transition to prograde during upper burn
-            [180.0, 0.0],  # Hold prograde through main upper-stage burn
+            [0.0, 60.0],    # Start with a higher pitch, more vertical
+            [60.0, 30.0],   # Pitch down more gently
+            [120.0, 10.0],  # Slowly approaching horizontal
+            [240.0, 0.0],   # Delay full prograde until higher altitude
+            [350.0, 0.0],   # Hold prograde
         ]
     )
-    pitch_prograde_speed_threshold: float = 100.0
+    pitch_prograde_speed_threshold: float = 1800.0
 
     # Throttle Program (Max-Q Bucket)
     throttle_guidance_mode: str = "parameterized"
@@ -54,11 +56,7 @@ class SoftwareConfig:
     booster_throttle_program: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 1.0],    # ALL ENGINES GO
-            [50.0, 1.0],   # Approaching Max Q speed
-            [60.0, 0.65],  # THROTTLE BUCKET: Reduce to 65% to save structure
-            [75.0, 0.65],  # Hold bucket
-            [85.0, 1.0],   # Max Q passed, power up
-            [150.0, 1.0],  # Burn to depletion/MECO
+            [150.0, 1.0],  # Burn to depletion/MECO - always full throttle
         ]
     )
     
@@ -66,8 +64,8 @@ class SoftwareConfig:
     upper_throttle_program_schedule: list = dataclasses.field(
         default_factory=lambda: [
             [0.0, 1.0],    # Full power
-            [350.0, 1.0],  # Long burn to orbit
-            [351.0, 0.0],  # SECO 1 (Main orbital insertion)
+            [900.0, 1.0],  # Long burn to orbit
+            [901.0, 0.0],  # SECO 1 (Main orbital insertion)
             [2500.0, 0.0], # Coast phase
             [2501.0, 1.0], # Circularization burn (if needed)
             [2520.0, 1.0], 
@@ -82,7 +80,7 @@ class SoftwareConfig:
     # Engine and Staging Parameters (moved from HardwareConfig / Rocket)
     main_engine_ramp_time: float = 3.0           # [s] (time for engines to reach full thrust from ignition)
     upper_engine_ramp_time: float = 1.0          # [s]
-    meco_mach: float = 4.0                       # [Mach] (Mach number at which booster MECO occurs)
+    meco_mach: float = 6.0                       # [Mach] (Mach number at which booster MECO occurs)
     separation_delay_s: float = 2.0              # [s] (time between booster MECO and stage separation)
     upper_ignition_delay_s: float = 2.0          # [s] (time between stage separation and upper stage ignition)
     engine_min_throttle: float = 0.4             # (Raptor deep throttle limit)

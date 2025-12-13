@@ -52,14 +52,17 @@ class EnvironmentConfig:
     # Drag Map (Transonic Rise)
     mach_cd_map: list = dataclasses.field(
         default_factory=lambda: [
-            [0.0, 0.30],
-            [0.8, 0.45], # Transonic drag spike
-            [1.0, 0.60], # Max drag at Mach 1
-            [1.2, 0.50],
-            [2.0, 0.35],
-            [5.0, 0.30], # Hypersonic
-            [10.0, 0.25],
-            [25.0, 0.20] # High hypersonic/Re-entry
+            [0.5, 0.245],
+            [0.8, 0.281],
+            [1.0, 0.508],
+            [1.2, 0.733],
+            [1.5, 0.645],
+            [2.0, 0.568],
+            [3.0, 0.513],
+            [4.0, 0.495],
+            [5.0, 0.478],
+            [7.5, 0.428],
+            [10.0, 0.341]
         ]
     )
 

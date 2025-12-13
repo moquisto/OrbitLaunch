@@ -171,7 +171,6 @@ def print_summary(log, sim, log_config, analysis_config):
     # Key event indices
     idx_max_alt = int(np.argmax(log.altitude)) if log.altitude else 0
     idx_max_speed = int(np.argmax(log.speed)) if log.speed else 0
-    idx_upper_off = np.argmin(np.abs(np.array(log.t_sim) - (sim.rocket.stage_engine_off_complete_time[1] or log.t_sim[-1]))) if log.t_sim else 0
 
     def print_state(label: str, idx: int):
         if not log.t_sim or idx >= len(log.t_sim):
@@ -214,23 +213,12 @@ def print_summary(log, sim, log_config, analysis_config):
         print("Orbit target NOT met.")
         
     # Stage fuel/engine timing diagnostics
-    booster_empty = sim.rocket.stage_fuel_empty_time[0]
-    upper_empty = sim.rocket.stage_fuel_empty_time[1]
-    booster_off = sim.rocket.stage_engine_off_complete_time[0]
-    upper_off = sim.rocket.stage_engine_off_complete_time[1]
-    if booster_empty is not None:
-        print(f"Booster fuel empty at t = {booster_empty:.1f} s")
-    if booster_off is not None:
-        print(f"Booster engine off at t = {booster_off:.1f} s")
-    if upper_empty is not None:
-        print(f"Upper fuel empty at t = {upper_empty:.1f} s")
-    if upper_off is not None:
-        print(f"Upper engine off at t = {upper_off:.1f} s")
-    print(f"Remaining prop (booster, upper): {[f'{p:.1f}' for p in sim.rocket.stage_prop_remaining]}")
+
+
     
     print_state("Max altitude", idx_max_alt)
     print_state("Max speed", idx_max_speed)
-    print_state("Upper engine off", idx_upper_off)
+
 
 def main():
     sim, state0, t_env0, log_config, analysis_config = main_orchestrator()

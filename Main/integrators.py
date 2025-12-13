@@ -22,7 +22,7 @@ class Integrator:
 class RK4(Integrator):
     def step(
         self,
-        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float]],
+        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float, State]], # Updated type hint
         state: State,
         t: float,
         dt: float,
@@ -31,46 +31,53 @@ class RK4(Integrator):
         Classic 4th-order Runge–Kutta integrator for the translational
         state (r, v, m).
 
-        deriv_fn(t, state) must return (dr_dt, dv_dt, dm_dt), where:
+        deriv_fn(t, state) must return (dr_dt, dv_dt, dm_dt, updated_state), where:
             dr_dt: np.ndarray (3,)   = velocity
             dv_dt: np.ndarray (3,)   = acceleration
             dm_dt: float             = mass rate [kg/s]
+            updated_state: State     = State object after event application
         """
         # k1 at (t, state)
-        k1_r, k1_v, k1_m = deriv_fn(t, state)
+        k1_r, k1_v, k1_m, s_k1_updated = deriv_fn(t, state) # Capture updated state
 
         # k2 at (t + dt/2, state + dt/2 * k1)
         s2 = state.copy()
         s2.r_eci = state.r_eci + 0.5 * dt * k1_r
         s2.v_eci = state.v_eci + 0.5 * dt * k1_v
         s2.m = state.m + 0.5 * dt * k1_m
-        k2_r, k2_v, k2_m = deriv_fn(t + 0.5 * dt, s2)
+        s2.stage_index = s_k1_updated.stage_index
+        s2.upper_ignition_start_time = s_k1_updated.upper_ignition_start_time
+        k2_r, k2_v, k2_m, s_k2_updated = deriv_fn(t + 0.5 * dt, s2)
 
         # k3 at (t + dt/2, state + dt/2 * k2)
         s3 = state.copy()
         s3.r_eci = state.r_eci + 0.5 * dt * k2_r
         s3.v_eci = state.v_eci + 0.5 * dt * k2_v
         s3.m = state.m + 0.5 * dt * k2_m
-        k3_r, k3_v, k3_m = deriv_fn(t + 0.5 * dt, s3)
+        s3.stage_index = s_k2_updated.stage_index
+        s3.upper_ignition_start_time = s_k2_updated.upper_ignition_start_time
+        k3_r, k3_v, k3_m, s_k3_updated = deriv_fn(t + 0.5 * dt, s3)
 
         # k4 at (t + dt, state + dt * k3)
         s4 = state.copy()
         s4.r_eci = state.r_eci + dt * k3_r
         s4.v_eci = state.v_eci + dt * k3_v
         s4.m = state.m + dt * k3_m
-        k4_r, k4_v, k4_m = deriv_fn(t + dt, s4)
+        s4.stage_index = s_k3_updated.stage_index
+        s4.upper_ignition_start_time = s_k3_updated.upper_ignition_start_time
+        k4_r, k4_v, k4_m, s_k4_updated = deriv_fn(t + dt, s4)
 
         # Combine increments
         r_next = state.r_eci + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
         v_next = state.v_eci + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
         m_next = state.m + (dt / 6.0) * (k1_m + 2.0 * k2_m + 2.0 * k3_m + k4_m)
-        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index, upper_ignition_start_time=state.upper_ignition_start_time)
+        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=s_k4_updated.stage_index, upper_ignition_start_time=s_k4_updated.upper_ignition_start_time)
 
 
 class VelocityVerlet(Integrator):
     def step(
         self,
-        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float]],
+        deriv_fn: Callable[[float, State], Tuple[np.ndarray, np.ndarray, float, State]], # Updated type hint
         state: State,
         t: float,
         dt: float,
@@ -93,7 +100,7 @@ class VelocityVerlet(Integrator):
         reasonable for standard rocket engines with small dt.
         """
         # Evaluate derivatives at the beginning of the step
-        dr_dt_n, dv_dt_n, dm_dt_n = deriv_fn(t, state)
+        dr_dt_n, dv_dt_n, dm_dt_n, s_n_updated = deriv_fn(t, state) # Capture updated state
         a_n = dv_dt_n
         m_dot_n = dm_dt_n
 
@@ -116,15 +123,19 @@ class VelocityVerlet(Integrator):
         s_prov.r_eci = r_next
         s_prov.v_eci = v_star
         s_prov.m = m_next
+        # Crucially, use the updated stage_index from s_n_updated
+        s_prov.stage_index = s_n_updated.stage_index
+        s_prov.upper_ignition_start_time = s_n_updated.upper_ignition_start_time
 
         # Acceleration at t + dt
-        _, dv_dt_np1, _ = deriv_fn(t + dt, s_prov)
+        _, dv_dt_np1, _, s_np1_updated = deriv_fn(t + dt, s_prov) # Capture updated state
         a_np1 = dv_dt_np1
 
         # Correct velocity with average acceleration
         v_next = v_n + 0.5 * (a_n + a_np1) * dt
 
-        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=state.stage_index, upper_ignition_start_time=state.upper_ignition_start_time)
+        # Use the stage_index and upper_ignition_start_time from the last updated state
+        return State(r_eci=r_next, v_eci=v_next, m=m_next, stage_index=s_np1_updated.stage_index, upper_ignition_start_time=s_np1_updated.upper_ignition_start_time)
 
 
 if __name__ == "__main__":

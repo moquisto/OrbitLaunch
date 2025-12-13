@@ -17,8 +17,8 @@ class HardwareConfig:
     
     # BOOSTER (Super Heavy)
     # Thrust: 33 Raptor 2s @ ~230tf = ~75-76 MN total
-    booster_thrust_vac: float = 7.6e7
-    booster_thrust_sl: float = 7.6e7
+    booster_thrust_vac: float = 1.52e8
+    booster_thrust_sl: float = 1.52e8
     
     # ISP: Booster uses sea-level optimized nozzles.
     # Real values: ~327s SL, ~350s Vacuum.
@@ -33,16 +33,16 @@ class HardwareConfig:
 
     # UPPER STAGE (Starship)
     # Thrust: 3 Vac (RVac) + 3 SL Raptors. ~1500tf total.
-    upper_thrust_vac: float = 1.5e7   
-    upper_thrust_sl: float = 7.5e6 # Efficiency drops at SL
+    upper_thrust_vac: float = 2.4e7   
+    upper_thrust_sl: float = 1.4e7 # Efficiency drops at SL
     
     # ISP: RVac engines pull the average up significantly in vacuum.
     upper_isp_vac: float = 380.0    
     upper_isp_sl: float = 330.0
     
     # Mass: ~120t dry + payload (Starlink v2 / HLS).
-    upper_dry_mass: float = 1.2e5       
-    upper_prop_mass: float = 1.2e6      
+    upper_dry_mass: float = 1.0e5       
+    upper_prop_mass: float = 2.5e6      
 
     # Aero / Dimensions
     ref_area_m2: float = 63.62  # A = pi * r^2 = pi * (4.5)^2 ≈ 63.62 m^2

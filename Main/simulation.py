@@ -113,7 +113,7 @@ class Simulation:
             throttle = float(np.clip(throttle * (self.max_q_limit / q), 0.0, 1.0))
 
         # Thrust + mass flow (using refactored rocket method)
-        current_prop_mass = self._propellant_remaining_current_stage
+        current_prop_mass = self._propellant_remaining_current_stage # Re-inserted line
         F_thrust, dm_dt = self.rocket.thrust_and_mass_flow(
             t_sim, # Pass current simulation time
             throttle,
@@ -191,6 +191,7 @@ class Simulation:
         # Initial propellant state for simulation (based on initial stage)
         self._propellant_remaining_current_stage = self.rocket.stages[state.stage_index].prop_mass
         self._total_dry_mass_remaining = sum(s.dry_mass for s in self.rocket.stages)
+        self._current_stage_idx = state.stage_index
 
         orbit_coast_end: float | None = None
 
@@ -205,7 +206,7 @@ class Simulation:
             rho_current = float(props_current.rho)
 
             v_atm_rotation_current = self.earth.atmosphere_velocity(state.r_eci)
-            wind_vector_current = self.aero._get_wind_at_altitude(altitude_current, state.r_eci) if self.use_jet_stream_model else np.zeros(3)
+            wind_vector_current = get_wind_at_altitude(altitude_current, self.env_config, state.r_eci) if self.use_jet_stream_model else np.zeros(3)
             v_air_current = v_atm_rotation_current + wind_vector_current
             v_rel_current = np.asarray(state.v_eci, dtype=float) - v_air_current
             v_rel_mag_current = np.linalg.norm(v_rel_current)
@@ -214,7 +215,7 @@ class Simulation:
 
 
             # Cache derivatives/extras so we don't recompute for logging + integrator.
-            rhs_cache: dict[tuple[float, int], tuple[np.ndarray, np.ndarray, float, dict]] = {}
+            rhs_cache: dict[tuple[float, int], tuple[np.ndarray, np.ndarray, float, State, dict]] = {} # Update key type to include State
 
             def rhs_cached(tau: float, s: State):
                 key = (tau, id(s))
@@ -224,18 +225,33 @@ class Simulation:
                     guidance_command = self.guidance.compute_command(tau, s, current_prop_mass_for_guidance, mach_current)
                     
                     # Apply events based on guidance command BEFORE integration step
-                    s = self.event_manager.apply_events(s, guidance_command)
+                    # This 's' is a copy, so modifying it here will be local to this rhs_cached call
+                    s_after_events = self.event_manager.apply_events(s.copy(), guidance_command) # Apply to a copy to avoid unexpected side-effects within deriv_fn calls
 
                     t_env_tau = t_env + (tau - t_sim)
                     # Pass the guidance command as control to _rhs
-                    rhs_cache[key] = self._rhs(t_env_tau, tau, s, guidance_command)
-                dr_dt, dv_dt, dm_dt, _extras = rhs_cache[key]
-                return dr_dt, dv_dt, dm_dt
+                    dr_dt, dv_dt, dm_dt, _extras = self._rhs(t_env_tau, tau, s_after_events, guidance_command)
+                    rhs_cache[key] = (dr_dt, dv_dt, dm_dt, s_after_events, _extras) # Store updated state as well
+                dr_dt, dv_dt, dm_dt, updated_s, _extras = rhs_cache[key]
+                return dr_dt, dv_dt, dm_dt, updated_s # Return updated state
 
             # Trigger first evaluation (k1) for current state/time and log using it.
-            drdt, dvdt, dmdt = rhs_cached(t_sim, state)
-            extras = rhs_cache[(t_sim, id(state))][3]
-            logger.record(t_sim, t_env, state, extras)
+            # rhs_cached now returns (dr_dt, dv_dt, dm_dt, updated_s)
+            drdt, dvdt, dmdt, current_s_after_events = rhs_cached(t_sim, state) # Unpack all 4 values
+
+            # Extract extras from the cache
+            # The key for rhs_cache is (tau, id(s)), and the value in cache is (dr_dt, dv_dt, dm_dt, s_after_events, _extras)
+            # So _extras is at index 4.
+            extras = rhs_cache[(t_sim, id(state))][4] # Correctly access extras at index 4
+
+            logger.record(t_sim, t_env, current_s_after_events, extras) # Use the updated state for logging
+
+            # If stage changed via an event, reset propellant tracking for the new stage.
+            if current_s_after_events.stage_index != self._current_stage_idx:
+                self._current_stage_idx = current_s_after_events.stage_index
+                self._propellant_remaining_current_stage = self.rocket.stages[self._current_stage_idx].prop_mass
+
+
 
             # Update propellant remaining for the current stage in Simulation's internal state
             if dmdt < 0: # dm_dt is negative for mass loss
@@ -293,4 +309,3 @@ class Simulation:
             t_env += dt
 
         return logger
-

@@ -2,7 +2,14 @@ import numpy as np
 import pytest
 from unittest.mock import Mock
 
-from Software.guidance import create_pitch_program_callable
+from Software.guidance import (
+    create_pitch_program_callable,
+    StageAwarePitchProgram,
+    ParameterizedThrottleProgram,
+    Guidance,
+)
+from Software.config import SoftwareConfig
+from Environment.config import EnvironmentConfig
 from Main.state import State
 
 def test_pitch_program_interpolation():
@@ -172,4 +179,176 @@ def test_pitch_program_pure_vertical_motion_horizontal_fallback():
     np.testing.assert_allclose(thrust_dir_x, expected_dir_x, atol=1e-6)
 
 
+def test_stage_aware_pitch_uses_stage_clock():
+    """
+    Ensure upper-stage pitch uses stage-relative time, not absolute sim time.
+    """
+    # Simple, distinct schedules to catch clock mix-ups
+    sw_config = SoftwareConfig(
+        pitch_program=[[0.0, 80.0], [10.0, 60.0]],           # Booster
+        upper_pitch_program=[[0.0, 10.0], [10.0, 0.0]],      # Upper
+    )
+    env_config = EnvironmentConfig()
+    pitch_prog = StageAwarePitchProgram(sw_config, env_config)
 
+    # Place vehicle on x-axis so east is y-axis for easy geometry
+    state = State(r_eci=np.array([env_config.earth_radius_m, 0.0, 0.0]), v_eci=np.zeros(3), m=1.0, stage_index=1)
+
+    # Use a large absolute time but a small stage-relative time; expect upper schedule interpolation
+    t_sim = 200.0
+    t_stage = 5.0  # halfway through upper schedule: expect ~5 deg above horizontal
+    thrust_dir = pitch_prog(t_sim, state, t_stage=t_stage, stage_index=1)
+
+    r_hat = state.r_eci / np.linalg.norm(state.r_eci)
+    east = np.cross([0.0, 0.0, 1.0], r_hat)
+    east /= np.linalg.norm(east)
+    pitch_measured = np.degrees(np.arctan2(np.dot(thrust_dir, r_hat), np.dot(thrust_dir, east)))
+    assert pitch_measured == pytest.approx(5.0, abs=0.2)
+
+
+def test_stage_aware_local_frame_radial_up_and_east():
+    """
+    Ensure local 'up' is radial and 'east' is tangent in ECI at an arbitrary latitude/longitude.
+    """
+    env_config = EnvironmentConfig(launch_lat_deg=45.0, launch_lon_deg=10.0)
+    sw_config = SoftwareConfig(
+        pitch_program=[[0.0, 90.0]],          # pure up
+        upper_pitch_program=[[0.0, 0.0]],     # not used here
+    )
+    pitch_prog = StageAwarePitchProgram(sw_config, env_config)
+
+    lat = np.deg2rad(env_config.launch_lat_deg)
+    lon = np.deg2rad(env_config.launch_lon_deg)
+    r = env_config.earth_radius_m * np.array(
+        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
+        dtype=float,
+    )
+    state = State(r_eci=r, v_eci=np.zeros(3), m=1.0, stage_index=0)
+
+    dir_up = pitch_prog(0.0, state, t_stage=0.0, stage_index=0)
+    r_hat = r / np.linalg.norm(r)
+    np.testing.assert_allclose(dir_up, r_hat, atol=1e-9)
+
+    # 0 deg should align with local east (tangent, perpendicular to r_hat and spin axis)
+    sw_config.pitch_program = [[0.0, 0.0]]
+    pitch_prog = StageAwarePitchProgram(sw_config, env_config)
+    dir_east = pitch_prog(0.0, state, t_stage=0.0, stage_index=0)
+    earth_spin = np.array([0.0, 0.0, 1.0])
+    east = np.cross(earth_spin, r_hat)
+    east /= np.linalg.norm(east)
+    np.testing.assert_allclose(dir_east, east, atol=1e-9)
+
+
+def test_stage_aware_prograde_fallback_after_schedule():
+    """
+    After schedule ends and speed is high, direction should go prograde.
+    """
+    env_config = EnvironmentConfig()
+    sw_config = SoftwareConfig(
+        pitch_program=[[0.0, 90.0], [1.0, 90.0]],  # short schedule
+        upper_pitch_program=[[0.0, 90.0]],
+    )
+    pitch_prog = StageAwarePitchProgram(sw_config, env_config)
+
+    r = np.array([env_config.earth_radius_m, 0.0, 0.0])
+    v = np.array([0.0, 1000.0, 0.0])  # tangential speed > prograde threshold
+    state = State(r_eci=r, v_eci=v, m=1.0, stage_index=0)
+
+    # t_rel beyond final_time => prograde
+    dir_vec = pitch_prog(10.0, state, t_stage=10.0, stage_index=0)
+    v_hat = v / np.linalg.norm(v)
+    np.testing.assert_allclose(dir_vec, v_hat, atol=1e-12)
+
+
+def test_guidance_liftoff_direction_is_radial():
+    """
+    Guidance thrust direction at t=0 should align with local radial (straight up).
+    """
+    env_config = EnvironmentConfig()
+    sw_config = SoftwareConfig(
+        pitch_program=[[0.0, 89.8]],
+        upper_pitch_program=[[0.0, 10.0]],
+        booster_throttle_program=[[0.0, 1.0]],
+        upper_throttle_program_schedule=[[0.0, 1.0]],
+    )
+    pitch_prog = StageAwarePitchProgram(sw_config, env_config)
+    upper_throttle = ParameterizedThrottleProgram(sw_config.upper_throttle_program_schedule)
+    booster_throttle = ParameterizedThrottleProgram(sw_config.booster_throttle_program)
+
+    class DummyStage:
+        def __init__(self, dry_mass):
+            self.dry_mass = dry_mass
+    rocket_stages = [DummyStage(100.0), DummyStage(50.0)]
+
+    guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=pitch_prog,
+        upper_throttle_program=upper_throttle,
+        booster_throttle_program=booster_throttle,
+        rocket_stages_info=rocket_stages,
+    )
+
+    lat = np.deg2rad(env_config.launch_lat_deg)
+    lon = np.deg2rad(env_config.launch_lon_deg)
+    r = env_config.earth_radius_m * np.array(
+        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
+        dtype=float,
+    )
+    state = State(r_eci=r, v_eci=np.zeros(3), m=1.0, stage_index=0)
+    cmd = guidance.compute_command(t_sim=0.0, state=state, current_prop_mass=10.0, mach=0.0)
+
+    r_hat = r / np.linalg.norm(r)
+    alignment = np.dot(cmd.thrust_direction_eci, r_hat)
+    # Pitch is 89.8 deg from horizontal -> tiny horizontal component expected
+    assert alignment == pytest.approx(np.sin(np.deg2rad(89.8)), rel=0, abs=1e-6)
+
+
+def test_guidance_uses_next_stage_direction_on_separation():
+    """
+    If separation is commanded this step, thrust direction should use the next stage's schedule.
+    """
+    sw_config = SoftwareConfig(
+        pitch_program=[[0.0, 80.0], [10.0, 80.0]],        # Booster points mostly up
+        upper_pitch_program=[[0.0, 10.0], [10.0, 10.0]],  # Upper nearly horizontal
+        booster_throttle_program=[[0.0, 1.0]],
+        upper_throttle_program_schedule=[[0.0, 1.0]],
+    )
+    env_config = EnvironmentConfig()
+    pitch_prog = StageAwarePitchProgram(sw_config, env_config)
+    upper_throttle = ParameterizedThrottleProgram(sw_config.upper_throttle_program_schedule)
+    booster_throttle = ParameterizedThrottleProgram(sw_config.booster_throttle_program)
+
+    class DummyStage:
+        def __init__(self, dry_mass):
+            self.dry_mass = dry_mass
+    rocket_stages = [DummyStage(100.0), DummyStage(50.0)]
+
+    guidance = Guidance(
+        sw_config=sw_config,
+        env_config=env_config,
+        pitch_program=pitch_prog,
+        upper_throttle_program=upper_throttle,
+        booster_throttle_program=booster_throttle,
+        rocket_stages_info=rocket_stages,
+    )
+    # Force a separation event at t=0
+    guidance.separation_time_planned = 0.0
+
+    state = State(
+        r_eci=np.array([env_config.earth_radius_m, 0.0, 0.0]),
+        v_eci=np.zeros(3),
+        m=1.0,
+        stage_index=0,
+    )
+
+    cmd = guidance.compute_command(t_sim=0.0, state=state, current_prop_mass=10.0, mach=0.0)
+
+    r_hat = state.r_eci / np.linalg.norm(state.r_eci)
+    east = np.cross([0.0, 0.0, 1.0], r_hat)
+    east /= np.linalg.norm(east)
+    pitch_measured = np.degrees(np.arctan2(np.dot(cmd.thrust_direction_eci, r_hat), np.dot(cmd.thrust_direction_eci, east)))
+
+    assert cmd.initiate_stage_separation is True
+    # Should follow upper-stage schedule (10 deg), not booster (80 deg)
+    assert pitch_measured == pytest.approx(10.0, abs=0.2)
