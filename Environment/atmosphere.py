@@ -26,6 +26,9 @@ class AtmosphereProperties:
     T: float
 
 
+_US76_LOOKUP_CACHE: dict[tuple[float, float], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+
+
 class AtmosphereModel:
     """Unified atmosphere model wrapping US76 and NRLMSIS 2.1.
 
@@ -55,6 +58,34 @@ class AtmosphereModel:
         # Fixed reference location for the high-altitude model (NRLMSIS-like)
         self.lat_deg = config.launch_lat_deg
         self.lon_deg = config.launch_lon_deg
+
+        # Optional fast US76 lookup table for the dense (0–h_switch) atmosphere.
+        self._us76_lookup_alt_m: np.ndarray | None = None
+        self._us76_lookup_rho: np.ndarray | None = None
+        self._us76_lookup_p: np.ndarray | None = None
+        self._us76_lookup_T: np.ndarray | None = None
+
+        if bool(getattr(config, "use_fast_atmosphere_lookup", False)):
+            step_m = float(getattr(config, "atmosphere_lookup_step_m", 250.0) or 250.0)
+            step_m = max(step_m, 1.0)
+            max_alt_m = float(self.h_switch)
+            cache_key = (max_alt_m, step_m)
+            cached = _US76_LOOKUP_CACHE.get(cache_key)
+            if cached is None:
+                alt_grid = np.arange(0.0, max_alt_m + step_m, step_m, dtype=float)
+                ds = ussa1976.compute(
+                    z=alt_grid,
+                    variables=["t", "p", "rho"],
+                )
+                cached = (
+                    alt_grid,
+                    np.asarray(ds["rho"], dtype=float),
+                    np.asarray(ds["p"], dtype=float),
+                    np.asarray(ds["t"], dtype=float),
+                )
+                _US76_LOOKUP_CACHE[cache_key] = cached
+
+            self._us76_lookup_alt_m, self._us76_lookup_rho, self._us76_lookup_p, self._us76_lookup_T = cached
 
     def properties(self, altitude: float, t: float | None = None) -> AtmosphereProperties:
         """Return atmospheric properties at a given altitude.
@@ -99,7 +130,16 @@ class AtmosphereModel:
         # Clamp altitude to the valid range of the USSA1976 model (0–1000 km)
         alt_clamped = float(np.clip(altitude, 0.0, 1_000_000.0))
 
-        # ussa1976 expects an array of altitudes in meters
+        if self._us76_lookup_alt_m is not None:
+            # Fast interpolation from the precomputed grid.
+            alt_grid = self._us76_lookup_alt_m
+            if alt_clamped <= float(alt_grid[-1]):
+                rho = float(np.interp(alt_clamped, alt_grid, self._us76_lookup_rho))
+                p = float(np.interp(alt_clamped, alt_grid, self._us76_lookup_p))
+                T = float(np.interp(alt_clamped, alt_grid, self._us76_lookup_T))
+                return AtmosphereProperties(rho=rho, p=p, T=T)
+
+        # Fallback: compute directly for this altitude.
         ds = ussa1976.compute(
             z=np.array([alt_clamped], dtype=float),
             variables=["t", "p", "rho"],

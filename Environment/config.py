@@ -38,6 +38,12 @@ class EnvironmentConfig:
     atmosphere_ap: float | None = None
     use_jet_stream_model: bool = True
 
+    # Atmosphere performance
+    # USSA1976 lookups are much faster than calling `ussa1976.compute(...)` for
+    # every simulation step. Enable this for optimization runs.
+    use_fast_atmosphere_lookup: bool = False
+    atmosphere_lookup_step_m: float = 250.0
+
     # Physics Constants
     G0: float = 9.80665
     P_SL: float = 101325.0

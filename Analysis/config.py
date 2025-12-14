@@ -63,7 +63,7 @@ class AnalysisConfig:
         140.0, # booster_pitch_time_4
         25.0,  # booster_pitch_angle_4
         2.0,   # coast_s (separation_delay_s)
-        900.0, # upper_burn_s (from upper_throttle_program_schedule)
+        345.0, # upper_burn_s (shorter burn avoids early escape)
         2.0,   # upper_ignition_delay_s
         0.0,   # azimuth_deg (default)
         0.0,   # upper_pitch_time_0
@@ -110,7 +110,7 @@ class OptimizationBounds:
             (80.0, 120.0),    # 7: pitch_time_3 (s) - Mid-atmosphere flight
             (20.0, 50.0),     # 8: pitch_angle_3 (deg)
             (110.0, 150.0),   # 9: pitch_time_4 (s) - Final moments before MECO
-            (0.0, 20.0),      # 10: pitch_angle_4 (deg)
+            (0.0, 30.0),      # 10: pitch_angle_4 (deg)
             # Staging and upper stage burn
             (0.0, 30.0),     # 11: Coast duration after MECO (s)
             (50.0, 1500.0),  # 12: Upper stage burn duration (s)
@@ -118,7 +118,7 @@ class OptimizationBounds:
             (-15.0, 15.0),   # 14: Azimuth heading (deg from east toward north)
             # Upper-stage pitch profile (time from upper ignition, deg from horizontal)
             (0.0, 60.0),     # 15: upper_pitch_time_0 (s)
-            (5.0, 45.0),     # 16: upper_pitch_angle_0 (deg)
+            (5.0, 75.0),     # 16: upper_pitch_angle_0 (deg)
             (40.0, 180.0),   # 17: upper_pitch_time_1 (s)
             (0.0, 30.0),     # 18: upper_pitch_angle_1 (deg)
             (150.0, 300.0),  # 19: upper_pitch_time_2 (s)

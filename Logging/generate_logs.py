@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from Analysis.config import OptimizationParams # Import OptimizationParams
 
-LOG_FILENAME = "optimization_twostage_log.csv" # Define here for consistency
+LOG_FILENAME = os.getenv("ORBITLAUNCH_LOG_FILENAME", "optimization_twostage_log.csv")  # Define here for consistency
 
 def _format_points(points: list[list[float]], *, t_digits: int = 3, v_digits: int = 3) -> str:
     formatted = [[round(float(t), t_digits), round(float(v), v_digits)] for t, v in points]
@@ -63,7 +63,16 @@ def log_iteration(phase: str, iteration: int, params: OptimizationParams, result
     """Helper to log a single optimizer iteration with de-scaled physics values."""
     if not isinstance(params, OptimizationParams):
         params = OptimizationParams(*params)
-    orbit_error = results.get("orbital_error", results.get("orbit_error", results.get("error", 0.0)))
+
+    def _float_or_nan(value: object) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except Exception:
+            return float("nan")
+
+    orbit_error = _float_or_nan(
+        results.get("orbital_error", results.get("orbit_error", results.get("error", float("nan"))))
+    )
 
     # Provide human-readable, effective schedules (sorted/expanded) to reduce confusion.
     booster_pitch_sorted = sorted(
@@ -164,16 +173,16 @@ def log_iteration(phase: str, iteration: int, params: OptimizationParams, result
             f"{params.upper_throttle_switch_ratio_0:.2f}", f"{params.upper_throttle_switch_ratio_1:.2f}", f"{params.upper_throttle_switch_ratio_2:.2f}",
             f"{params.booster_throttle_level_0:.2f}", f"{params.booster_throttle_level_1:.2f}", f"{params.booster_throttle_level_2:.2f}", f"{params.booster_throttle_level_3:.2f}",
             f"{params.booster_throttle_switch_ratio_0:.2f}", f"{params.booster_throttle_switch_ratio_1:.2f}", f"{params.booster_throttle_switch_ratio_2:.2f}",
-            f"{results.get('cost', 0.0):.2f}",
-            f"{results.get('fuel', 0.0):.2f}",
+            f"{_float_or_nan(results.get('cost', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('fuel', float('nan'))):.2f}",
             f"{orbit_error:.2f}",
-            f"{results.get('perigee_error_m', 0.0):.2f}",
-            f"{results.get('apoapsis_error_m', 0.0):.2f}",
-            f"{results.get('max_altitude', 0.0):.2f}",
+            f"{_float_or_nan(results.get('perigee_error_m', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('apoapsis_error_m', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('max_altitude', float('nan'))):.2f}",
             str(results.get("cutoff_reason", "") or ""),
-            f"{results.get('perigee_alt_m', 0.0):.2f}",
-            f"{results.get('apoapsis_alt_m', 0.0):.2f}",
-            f"{results.get('eccentricity', 0.0):.6f}",
+            f"{_float_or_nan(results.get('perigee_alt_m', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('apoapsis_alt_m', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('eccentricity', float('nan'))):.6f}",
             _format_points(booster_pitch_sorted, t_digits=1, v_digits=1),
             _format_points(upper_pitch_sorted, t_digits=1, v_digits=1),
             _format_points(booster_throttle_schedule, t_digits=3, v_digits=3),

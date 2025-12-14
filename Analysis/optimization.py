@@ -16,6 +16,7 @@ This version incorporates input scaling, coarse-to-fine simulation, and detailed
 """
 import sys
 from pathlib import Path
+import os
 
 # Allow running this file directly (e.g. `python3 Analysis/optimization.py`) by
 # ensuring the repo root is on sys.path so `import main` works.
@@ -27,6 +28,7 @@ if __package__ in (None, ""):
 import multiprocessing
 import copy
 import traceback
+import dataclasses
 import numpy as np
 from scipy.optimize import differential_evolution
 
@@ -65,9 +67,16 @@ class ObjectiveFunctionWrapper:
         analysis_config,
         bounds,
         *,
+        label: str | None = None,
         param_space: str = "physical",
+        active_indices: list[int] | None = None,
+        base_params_phys: np.ndarray | list[float] | OptimizationParams | None = None,
+        dt_s: float | None = None,
+        duration_s: float | None = None,
+        enable_logging: bool = False,
     ):
         self.phase = phase
+        self.label = str(label) if label is not None else f"Phase {phase}"
         self.env_config = env_config
         self.hw_config = hw_config
         self.sw_config = sw_config
@@ -76,9 +85,26 @@ class ObjectiveFunctionWrapper:
         self.analysis_config = analysis_config
         self.bounds = bounds
         self.param_space = param_space
+        self.active_indices = list(active_indices) if active_indices is not None else None
+        self.dt_s = dt_s
+        self.duration_s = duration_s
+        self.enable_logging = bool(enable_logging)
         self._lb = np.array([b[0] for b in bounds], dtype=float)
         self._ub = np.array([b[1] for b in bounds], dtype=float)
         self._span = self._ub - self._lb
+
+        if self.active_indices is not None:
+            if base_params_phys is None:
+                raise ValueError("base_params_phys is required when active_indices is provided.")
+            if isinstance(base_params_phys, OptimizationParams):
+                base_vec = np.array(dataclasses.astuple(base_params_phys), dtype=float)
+            else:
+                base_vec = np.asarray(base_params_phys, dtype=float)
+            if base_vec.shape[0] != 35:
+                raise ValueError(f"base_params_phys must have length 35, got {base_vec.shape[0]}")
+            self.base_params_phys = base_vec
+        else:
+            self.base_params_phys = None
 
     def __call__(self, scaled_params: np.ndarray):
         global global_iter_count, global_log_lock
@@ -93,11 +119,17 @@ class ObjectiveFunctionWrapper:
         raw_params = np.asarray(scaled_params, dtype=float)
         if self.param_space == "unit":
             unit_params = np.clip(raw_params, 0.0, 1.0)
-            phys_params = self._lb + unit_params * self._span
+            phys_params_active = self._lb + unit_params * self._span
         else:
-            phys_params = raw_params
+            phys_params_active = raw_params
 
-        params_obj = OptimizationParams(*phys_params.tolist())
+        if self.active_indices is None:
+            phys_params_full = phys_params_active
+        else:
+            phys_params_full = np.array(self.base_params_phys, dtype=float)
+            phys_params_full[self.active_indices] = phys_params_active
+
+        params_obj = OptimizationParams(*np.asarray(phys_params_full, dtype=float).tolist())
         results = run_simulation_wrapper(
             params_obj,
             self.env_config,
@@ -105,26 +137,29 @@ class ObjectiveFunctionWrapper:
             self.sw_config,
             self.sim_config,
             self.log_config,
-            self.phase  # Pass phase to the wrapper
+            self.phase,  # Pass phase to the wrapper
+            dt_s=self.dt_s,
+            duration_s=self.duration_s,
         )
         
         cost = results.get('cost', PENALTY_CRASH) # Use the cost calculated in the results
-        if global_log_lock is None:
-            log_iteration(f"Phase {self.phase}", current_iter, params_obj, results)
-        else:
-            with global_log_lock:
-                log_iteration(f"Phase {self.phase}", current_iter, params_obj, results)
+        if self.enable_logging:
+            if global_log_lock is None:
+                log_iteration(self.label, current_iter, params_obj, results)
+            else:
+                with global_log_lock:
+                    log_iteration(self.label, current_iter, params_obj, results)
 
         if self.phase == 1:
             print(
-                f"[Phase 1] Iter {current_iter:3d} | Cost: {cost:.1f} | Status: {results['status']}", 
+                f"[{self.label}] Iter {current_iter:3d} | Cost: {cost:.1f} | Status: {results['status']}", 
                 flush=True
             )
         else: # Phase 2
             fuel = results.get('fuel', 0)
             error = results.get('orbital_error', 0)
             print(
-                f"[Phase 2] Iter {current_iter:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", 
+                f"[{self.label}] Iter {current_iter:3d} | Fuel: {fuel:.0f} kg | Error: {error/1000:.1f} km | Cost: {cost:.0f} | Status: {results['status']}", 
                 flush=True
             )
 
@@ -170,29 +205,37 @@ def run_simulation_wrapper(
     cfg_sim = copy.deepcopy(sim_config)
     cfg_log = copy.deepcopy(log_config)
 
+    # Optimization runs call the atmosphere model thousands of times; enable the
+    # fast US76 lookup table for performance. (This is still deterministic and
+    # numerically close to direct US76 queries.)
+    cfg_env.use_fast_atmosphere_lookup = True
+
     cfg_sw, cfg_sim = configure_software_for_optimization(params, cfg_sw, cfg_sim, cfg_env)
 
     # Use a phase-dependent simulation fidelity: phase 1 can be coarser, phase 2
     # should be finer to make fuel comparisons meaningful.
     if phase == 1:
-        cfg_sim.main_dt_s = 0.5
+        cfg_sim.main_dt_s = 1.0
+        cfg_sim.integrator = "velocity_verlet"
     else:
-        cfg_sim.main_dt_s = 0.25
+        cfg_sim.main_dt_s = 0.5
+        cfg_sim.integrator = "velocity_verlet"
 
-    # Simulate long enough to include the full burn program and a short coast so
-    # orbital elements are evaluated after cutoff, without relying on "exit on orbit"
-    # (which can otherwise stop mid-burn and bias fuel usage downward).
-    burn_and_coast = (
-        float(params.upper_burn_s)
-        + float(params.coast_s)
-        + float(params.upper_ignition_delay_s)
-        + 700.0
-    )
-    cfg_sim.main_duration_s = float(np.clip(burn_and_coast, 800.0, 6000.0))
+    # Simulate only until shortly after SECO, then stop. Orbital elements can be
+    # computed from the state at cutoff (no need to coast to apoapsis), and
+    # shortening the horizon massively speeds up optimization.
+    booster_time_est = max(float(params.booster_pitch_time_4), 120.0) + 80.0
+    upper_start_est = booster_time_est + float(params.coast_s) + float(params.upper_ignition_delay_s)
+    upper_cutoff_est = upper_start_est + float(params.upper_burn_s) + 2.0  # +1s shutdown point + margin
+    post_cutoff_coast_s = 60.0 if phase == 1 else 120.0
+    cfg_sim.main_duration_s = float(np.clip(upper_cutoff_est + post_cutoff_coast_s, 300.0, 3000.0))
 
     # Allow callers (e.g., final evaluation) to override fidelity.
     if dt_s is not None:
         cfg_sim.main_dt_s = float(dt_s)
+        # Use RK4 for fine timesteps to reduce numerical noise during polishing.
+        if cfg_sim.main_dt_s <= 0.25:
+            cfg_sim.integrator = "rk4"
     if duration_s is not None:
         cfg_sim.main_duration_s = float(duration_s)
 
@@ -292,6 +335,24 @@ def run_cma_phase(
 
 def run_optimization():
     """Runs the two-phase optimization process."""
+    def _env_int(name: str, default: int) -> int:
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            return int(default)
+        try:
+            return max(1, int(float(raw)))
+        except Exception:
+            return int(default)
+
+    def _env_float(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            return float(default)
+        try:
+            return float(raw)
+        except Exception:
+            return float(default)
+
     env_config = EnvironmentConfig()
     hw_config = HardwareConfig()
     sw_config = SoftwareConfig()
@@ -300,29 +361,36 @@ def run_optimization():
     analysis_config = AnalysisConfig()
 
     # Initialize shared counter and a lock for logging from worker processes.
-    global global_iter_count
-    global_iter_count = multiprocessing.Value('i', 0)
-    global global_log_lock
+    global global_iter_count, global_log_lock
+    global_iter_count = multiprocessing.Value("i", 0)
     global_log_lock = multiprocessing.Lock()
 
     # --- Initial Guess & Bounds (SCALED) ---
     # The bounds are now managed centrally in Analysis/config.py
-    bounds_phys = OptimizationBounds.get_bounds()
-    bounds_unit = [(0.0, 1.0)] * len(bounds_phys)
-    lb_phys = np.array([b[0] for b in bounds_phys], dtype=float)
-    ub_phys = np.array([b[1] for b in bounds_phys], dtype=float)
-    span_phys = ub_phys - lb_phys
-    span_phys = np.where(span_phys == 0.0, 1.0, span_phys)
+    bounds_phys_full = OptimizationBounds.get_bounds()
+    lb_phys_full = np.array([b[0] for b in bounds_phys_full], dtype=float)
+    ub_phys_full = np.array([b[1] for b in bounds_phys_full], dtype=float)
+    span_phys_full = ub_phys_full - lb_phys_full
+    fixed_mask_phys_full = span_phys_full == 0.0
+    span_phys_full_safe = np.where(fixed_mask_phys_full, 1.0, span_phys_full)
 
     def to_unit(x_phys: np.ndarray) -> np.ndarray:
-        return (np.asarray(x_phys, dtype=float) - lb_phys) / span_phys
+        x = np.asarray(x_phys, dtype=float)
+        u = (x - lb_phys_full) / span_phys_full_safe
+        # Fixed dimensions map to 0 in unit space (any value is equivalent).
+        if np.any(fixed_mask_phys_full):
+            u = np.where(fixed_mask_phys_full, 0.0, u)
+        return u
 
     def from_unit(x_unit: np.ndarray) -> np.ndarray:
         u = np.asarray(x_unit, dtype=float)
-        return lb_phys + np.clip(u, 0.0, 1.0) * span_phys
+        # IMPORTANT: use the true span (can be 0 for fixed dims) so those
+        # parameters remain fixed at lb_phys.
+        return lb_phys_full + np.clip(u, 0.0, 1.0) * span_phys_full
 
-    def tighten_bounds(bounds_in, seed, margin=0.2):
+    def tighten_bounds_unit(bounds_in: list[tuple[float, float]], seed: np.ndarray, margin: float = 0.2):
         tightened = []
+        seed = np.asarray(seed, dtype=float)
         for (lo, hi), s in zip(bounds_in, seed):
             width = hi - lo
             new_lo = max(lo, s - margin * width)
@@ -332,128 +400,378 @@ def run_optimization():
             tightened.append((new_lo, new_hi))
         return tightened
 
+    def make_unit_mapper(bounds_phys: list[tuple[float, float]]):
+        lb = np.array([b[0] for b in bounds_phys], dtype=float)
+        ub = np.array([b[1] for b in bounds_phys], dtype=float)
+        span = ub - lb
+        fixed = span == 0.0
+        span_safe = np.where(fixed, 1.0, span)
+
+        def to_unit_local(x_phys: np.ndarray) -> np.ndarray:
+            x = np.asarray(x_phys, dtype=float)
+            u = (x - lb) / span_safe
+            if np.any(fixed):
+                u = np.where(fixed, 0.0, u)
+            return u
+
+        def from_unit_local(x_unit: np.ndarray) -> np.ndarray:
+            u = np.asarray(x_unit, dtype=float)
+            return lb + np.clip(u, 0.0, 1.0) * span
+
+        return lb, ub, to_unit_local, from_unit_local
+
+    def apply_fixed_defaults(params_phys_full: np.ndarray) -> np.ndarray:
+        """Remove nuisance degrees of freedom for faster convergence."""
+        x = np.array(params_phys_full, dtype=float, copy=True)
+        # Azimuth is not constrained by the cost function (no inclination target),
+        # so fixing it avoids wasting search effort.
+        x[14] = 0.0
+
+        # Throttle schedules are largely redundant in this model because fuel is
+        # minimized via burn duration and the sim already enforces Max-Q/accel
+        # by scaling thrust. Fixing throttle cuts 14 dimensions.
+        x[21:25] = 1.0
+        x[25:28] = np.array([0.1, 0.5, 0.9], dtype=float)
+        x[28:32] = 1.0
+        x[32:35] = np.array([0.1, 0.5, 0.9], dtype=float)
+        return x
+
+    fixed_indices = {14, *range(21, 35)}
+    active_indices = [i for i in range(35) if i not in fixed_indices]
+
     if analysis_config.optimizer_manual_seed and len(analysis_config.optimizer_manual_seed) == 35:
-        start_params_phys = np.array(analysis_config.optimizer_manual_seed, dtype=float)
+        start_params_phys_full = np.array(analysis_config.optimizer_manual_seed, dtype=float)
     else:
-        start_params_phys = (lb_phys + ub_phys) / 2.0
+        start_params_phys_full = (lb_phys_full + ub_phys_full) / 2.0
+
+    # Ensure seed respects bounds and fixed defaults.
+    start_params_phys_full = np.clip(start_params_phys_full, lb_phys_full, ub_phys_full)
+    start_params_phys_full = apply_fixed_defaults(start_params_phys_full)
+    start_params_phys_full = np.clip(start_params_phys_full, lb_phys_full, ub_phys_full)
+
+    # Pre-build bounds/mappers for the active subset.
+    bounds_active_phys = [bounds_phys_full[i] for i in active_indices]
+    bounds_active_unit = [(0.0, 1.0)] * len(active_indices)
+    _lb_active, _ub_active, to_unit_active, from_unit_active = make_unit_mapper(bounds_active_phys)
 
     ensure_log_header()
     print(f"=== PHASE 1: TARGETING ORBIT (Logging to {LOG_FILENAME}) ===", flush=True)
     with global_iter_count.get_lock():
         global_iter_count.value = 0
-    
-    
-    # Ensure seed respects the active bounds to avoid CMA boundary errors.
-    # Clip seed to physical bounds, then map into unit space for better conditioning.
-    start_params_phys = np.clip(start_params_phys, lb_phys, ub_phys)
-    start_params_unit = np.clip(to_unit(start_params_phys), 0.0, 1.0)
-    
+
+    # Evaluate the seed once to choose reasonable optimizer hyperparameters.
+    seed_results = run_simulation_wrapper(
+        start_params_phys_full,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config,
+        phase=1,
+    )
+    seed_status = seed_results.get("status", "UNKNOWN")
+    seed_orbit_error = float(seed_results.get("orbital_error", PENALTY_CRASH) or PENALTY_CRASH)
+
+    if seed_status in {"OK", "GOOD", "PERFECT"}:
+        phase1_maxiter = 80
+        phase1_popsize = 16
+        sigma1 = 0.20
+    else:
+        phase1_maxiter = 200
+        phase1_popsize = 24
+        sigma1 = 0.35
+
+    # Optional overrides for experimentation / quick smoke runs.
+    phase1_maxiter = _env_int("ORBITLAUNCH_PHASE1_MAXITER", phase1_maxiter)
+    phase1_popsize = _env_int("ORBITLAUNCH_PHASE1_POPSIZE", phase1_popsize)
+
+    start_active_unit = np.clip(to_unit_active(start_params_phys_full[active_indices]), 0.0, 1.0)
+
     objective_phase1 = ObjectiveFunctionWrapper(
         phase=1,
+        label="Phase 1",
         env_config=env_config,
         hw_config=hw_config,
         sw_config=sw_config,
         sim_config=sim_config,
         log_config=log_config,
         analysis_config=analysis_config,
-        bounds=bounds_phys,
+        bounds=bounds_active_phys,
         param_space="unit",
+        active_indices=active_indices,
+        base_params_phys=start_params_phys_full,
+        enable_logging=True,
     )
 
     if CMA_AVAILABLE:
         print("Using CMA-ES for Phase 1", flush=True)
         res1 = run_cma_phase(
             objective_phase1,
-            bounds_unit,
+            bounds_active_unit,
             global_iter_count,
             global_log_lock,
-            start=start_params_unit,
-            sigma_scale=0.35,
-            maxiter=200,
-            popsize=24,
+            start=start_active_unit,
+            sigma_scale=sigma1,
+            maxiter=phase1_maxiter,
+            popsize=phase1_popsize,
         )
-        best1_unit = res1.xbest
+        best1_unit_active = np.asarray(res1.xbest, dtype=float)
         best1_cost = res1.fbest
     else:
         print("CMA-ES not available, falling back to Differential Evolution for Phase 1", flush=True)
         res = differential_evolution(
             objective_phase1,
-            bounds_unit,
-            maxiter=200,
+            bounds_active_unit,
+            maxiter=phase1_maxiter,
             disp=True
         )
-        best1_unit = res.x
+        best1_unit_active = np.asarray(res.x, dtype=float)
         best1_cost = res.fun
 
-    best1 = from_unit(best1_unit)
+    best1_active_phys = from_unit_active(best1_unit_active)
+    best1_phys_full = np.array(start_params_phys_full, dtype=float, copy=True)
+    best1_phys_full[active_indices] = best1_active_phys
+    best1_phys_full = apply_fixed_defaults(best1_phys_full)
+    best1_phys_full = np.clip(best1_phys_full, lb_phys_full, ub_phys_full)
+
+    # Re-evaluate the best phase-1 candidate to confirm it is a bound, survivable
+    # orbit (some optimizers can report a best point that is only marginally
+    # better due to numerical noise).
+    best1_results = run_simulation_wrapper(
+        best1_phys_full,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config,
+        phase=1,
+    )
+
+    # Never allow Phase 1 to get worse than the (already orbiting) manual seed.
+    # CMA-ES does not automatically evaluate the starting point as a candidate.
+    seed_cost1 = float(seed_results.get("cost", PENALTY_CRASH) or PENALTY_CRASH)
+    best1_cost1 = float(best1_results.get("cost", best1_cost) or best1_cost)
+    seed_is_orbit = seed_status in {"OK", "GOOD", "PERFECT"}
+    best1_is_orbit = best1_results.get("status") in {"OK", "GOOD", "PERFECT"}
+    if seed_is_orbit and (not best1_is_orbit or seed_cost1 <= best1_cost1):
+        best1_phys_full = np.array(start_params_phys_full, dtype=float, copy=True)
+        best1_results = seed_results
+        best1_cost1 = seed_cost1
+        best1_is_orbit = True
 
     print(f"\n--- Phase 1 Complete ---", flush=True)
-    print(f"Best Error/Cost: {best1_cost/1000:.1f} km", flush=True)
-    print(f"Phase 1 Optimal Parameters (summary): Mach={best1[0]:.2f}, Coast={best1[11]:.1f}s, Upper Burn={best1[12]:.1f}s. Full details in {LOG_FILENAME}", flush=True)
+    print(f"Seed status: {seed_status} | Seed orbit error: {seed_orbit_error/1000:.1f} km", flush=True)
+    print(f"Best Error/Cost: {best1_cost1/1000:.1f} km", flush=True)
+    print(
+        f"Phase 1 Best (summary): Mach={best1_phys_full[0]:.2f}, Coast={best1_phys_full[11]:.1f}s, "
+        f"Upper Burn={best1_phys_full[12]:.1f}s. Full details in {LOG_FILENAME}",
+        flush=True,
+    )
 
-    if best1_cost > 50000:  # If we're still more than 50km off, it's probably not a good solution
-        print("\nFailed to find a stable orbit in Phase 1. Stopping.", flush=True)
+    if not best1_is_orbit:
+        print(
+            f"\nFailed to find a stable orbit in Phase 1 (best status: {best1_results.get('status')}). Stopping.",
+            flush=True,
+        )
         return
+
+    best1_orbit_error = float(best1_results.get("orbital_error", best1_cost1) or best1_cost1)
 
     print("\n=== PHASE 2: MINIMIZING FUEL (CMA-ES if available) ===", flush=True)
     with global_iter_count.get_lock():
         global_iter_count.value = 0  # Reset for phase 2 logging
-    
-    
-    objective_phase2 = ObjectiveFunctionWrapper(
+
+    base_params_phase2_phys_full = np.array(best1_phys_full, dtype=float, copy=True)
+    base_params_phase2_phys_full = apply_fixed_defaults(base_params_phase2_phys_full)
+    base_params_phase2_phys_full = np.clip(base_params_phase2_phys_full, lb_phys_full, ub_phys_full)
+    start2_unit_active = np.clip(to_unit_active(base_params_phase2_phys_full[active_indices]), 0.0, 1.0)
+
+    # Baseline phase-2 cost at the phase-1 best orbit; we'll never accept a worse result.
+    baseline2_results = run_simulation_wrapper(
+        base_params_phase2_phys_full,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config,
         phase=2,
+    )
+    baseline2_cost = float(baseline2_results.get("cost", PENALTY_CRASH) or PENALTY_CRASH)
+
+    objective_phase2_coarse = ObjectiveFunctionWrapper(
+        phase=2,
+        label="Phase 2 (coarse)",
         env_config=env_config,
         hw_config=hw_config,
         sw_config=sw_config,
         sim_config=sim_config,
         log_config=log_config,
         analysis_config=analysis_config,
-        bounds=bounds_phys,
+        bounds=bounds_active_phys,
         param_space="unit",
+        active_indices=active_indices,
+        base_params_phys=base_params_phase2_phys_full,
+        enable_logging=True,
     )
 
+    if best1_orbit_error <= 200_000.0:
+        bounds2_unit_active = tighten_bounds_unit(bounds_active_unit, start2_unit_active, margin=0.15)
+        sigma2 = 0.15
+    elif best1_orbit_error <= 1_000_000.0:
+        bounds2_unit_active = tighten_bounds_unit(bounds_active_unit, start2_unit_active, margin=0.30)
+        sigma2 = 0.25
+    else:
+        bounds2_unit_active = bounds_active_unit
+        sigma2 = 0.35
+
+    phase2_coarse_maxiter = _env_int("ORBITLAUNCH_PHASE2_COARSE_MAXITER", 200)
+    phase2_coarse_popsize = _env_int("ORBITLAUNCH_PHASE2_COARSE_POPSIZE", 16)
+
     if CMA_AVAILABLE:
-        # Seed phase 2 from phase 1 best with a smaller sigma to focus search.
         res2 = run_cma_phase(
-            objective_phase2,
-            tighten_bounds(bounds_unit, best1_unit, margin=0.15),
+            objective_phase2_coarse,
+            bounds2_unit_active,
             global_iter_count,
             global_log_lock,
-            start=best1_unit,
-            sigma_scale=0.15,
-            maxiter=250,
-            popsize=24,
+            start=start2_unit_active,
+            sigma_scale=sigma2,
+            maxiter=phase2_coarse_maxiter,
+            popsize=phase2_coarse_popsize,
         )
-        best2_unit = res2.xbest
-        best2_cost = res2.fbest
+        best2_unit_active = np.asarray(res2.xbest, dtype=float)
+        best2_cost = float(res2.fbest)
     else:
         res = differential_evolution(
-            objective_phase2,
-            bounds_unit,
-            maxiter=250,
-            disp=True
+            objective_phase2_coarse,
+            bounds2_unit_active,
+            maxiter=phase2_coarse_maxiter,
+            disp=True,
         )
-        best2_unit = res.x
-        best2_cost = res.fun
+        best2_unit_active = np.asarray(res.x, dtype=float)
+        best2_cost = float(res.fun)
+
+    best2_active_phys = from_unit_active(best2_unit_active)
+    best2_phys_full = np.array(base_params_phase2_phys_full, dtype=float, copy=True)
+    best2_phys_full[active_indices] = best2_active_phys
+    best2_phys_full = apply_fixed_defaults(best2_phys_full)
+    best2_phys_full = np.clip(best2_phys_full, lb_phys_full, ub_phys_full)
+
+    best2_results = run_simulation_wrapper(
+        best2_phys_full,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config,
+        phase=2,
+    )
+    best2_cost_eval = float(best2_results.get("cost", best2_cost) or best2_cost)
+    best2_is_orbit = best2_results.get("status") in {"OK", "GOOD", "PERFECT"}
+    baseline2_is_orbit = baseline2_results.get("status") in {"OK", "GOOD", "PERFECT"}
+    if baseline2_is_orbit and (not best2_is_orbit or baseline2_cost <= best2_cost_eval):
+        best2_unit_active = start2_unit_active
+        best2_phys_full = np.array(base_params_phase2_phys_full, dtype=float, copy=True)
+        best2_cost_eval = baseline2_cost
+        best2_results = baseline2_results
+
+    # --- Phase 2 Polish (higher-fidelity dt) ---
+    print("\n=== PHASE 2: POLISH (higher fidelity) ===", flush=True)
+    with global_iter_count.get_lock():
+        global_iter_count.value = 0
+
+    # Tighten around the best coarse solution, relative to the already-tight bounds.
+    bounds2_polish_unit_active = tighten_bounds_unit(bounds2_unit_active, best2_unit_active, margin=0.20)
+
+    objective_phase2_polish = ObjectiveFunctionWrapper(
+        phase=2,
+        label="Phase 2 (polish)",
+        env_config=env_config,
+        hw_config=hw_config,
+        sw_config=sw_config,
+        sim_config=sim_config,
+        log_config=log_config,
+        analysis_config=analysis_config,
+        bounds=bounds_active_phys,
+        param_space="unit",
+        active_indices=active_indices,
+        base_params_phys=base_params_phase2_phys_full,
+        dt_s=_env_float("ORBITLAUNCH_PHASE2_POLISH_DT_S", 0.25),
+        enable_logging=True,
+    )
+
+    phase2_polish_maxiter = _env_int("ORBITLAUNCH_PHASE2_POLISH_MAXITER", 80)
+    phase2_polish_popsize = _env_int("ORBITLAUNCH_PHASE2_POLISH_POPSIZE", 16)
+
+    if CMA_AVAILABLE:
+        res2p = run_cma_phase(
+            objective_phase2_polish,
+            bounds2_polish_unit_active,
+            global_iter_count,
+            global_log_lock,
+            start=best2_unit_active,
+            sigma_scale=0.10,
+            maxiter=phase2_polish_maxiter,
+            popsize=phase2_polish_popsize,
+        )
+        best2p_unit_active = np.asarray(res2p.xbest, dtype=float)
+        best2p_cost = float(res2p.fbest)
+    else:
+        res = differential_evolution(
+            objective_phase2_polish,
+            bounds2_polish_unit_active,
+            maxiter=phase2_polish_maxiter,
+            disp=True,
+        )
+        best2p_unit_active = np.asarray(res.x, dtype=float)
+        best2p_cost = float(res.fun)
+
+    best2p_active_phys = from_unit_active(best2p_unit_active)
+    final_params2 = np.array(base_params_phase2_phys_full, dtype=float, copy=True)
+    final_params2[active_indices] = best2p_active_phys
+    final_params2 = apply_fixed_defaults(final_params2)
+    final_params2 = np.clip(final_params2, lb_phys_full, ub_phys_full)
 
     print("\n=== OPTIMIZATION COMPLETE ===", flush=True)
-    final_params2 = from_unit(best2_unit)
-    # Run one last time for final numbers on a finer timestep for a more
-    # trustworthy fuel figure.
-    final_results = run_simulation_wrapper(
+
+    # Compare the polished solution to the best coarse/baseline solution at the
+    # same (fine) fidelity before reporting final numbers.
+    eval_dt = sim_config.main_dt_s
+    candidate_results_polish = run_simulation_wrapper(
         final_params2,
         env_config,
         hw_config,
         sw_config,
         sim_config,
         log_config,
-        phase=2,  # Explicitly use phase 2 for final evaluation
-        dt_s=sim_config.main_dt_s,
+        phase=2,
+        dt_s=eval_dt,
     )
+    candidate_results_coarse = run_simulation_wrapper(
+        best2_phys_full,
+        env_config,
+        hw_config,
+        sw_config,
+        sim_config,
+        log_config,
+        phase=2,
+        dt_s=eval_dt,
+    )
+    candidate_cost_polish = float(candidate_results_polish.get("cost", PENALTY_CRASH) or PENALTY_CRASH)
+    candidate_cost_coarse = float(candidate_results_coarse.get("cost", PENALTY_CRASH) or PENALTY_CRASH)
+
+    if candidate_cost_coarse <= candidate_cost_polish:
+        final_params2 = np.array(best2_phys_full, dtype=float, copy=True)
+        final_results = candidate_results_coarse
+    else:
+        final_results = candidate_results_polish
 
     print(f"Final Fuel Used: {final_results['fuel']:.1f} kg", flush=True)
     print(f"Final Orbit Error: {final_results['orbital_error']/1000:.1f} km", flush=True)
-    print(f"Optimal Parameters (summary): Mach={final_params2[0]:.2f}, Coast={final_params2[11]:.1f}s, Upper Burn={final_params2[12]:.1f}s. Full details in {LOG_FILENAME}", flush=True)
+    print(
+        f"Optimal Parameters (summary): Mach={final_params2[0]:.2f}, Coast={final_params2[11]:.1f}s, "
+        f"Upper Burn={final_params2[12]:.1f}s. Full details in {LOG_FILENAME}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
