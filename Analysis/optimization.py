@@ -187,6 +187,7 @@ def run_simulation_wrapper(
     *,
     dt_s: float | None = None,
     duration_s: float | None = None,
+    return_log: bool = False,
 ):
     """
     Runs the simulation with a structured parameter object.
@@ -219,7 +220,9 @@ def run_simulation_wrapper(
         cfg_sim.integrator = "velocity_verlet"
     else:
         cfg_sim.main_dt_s = 0.5
-        cfg_sim.integrator = "velocity_verlet"
+        # RK4 is substantially more accurate for the non-conservative forces in
+        # ascent (thrust + drag), especially at dt=0.5s used in the coarse stage.
+        cfg_sim.integrator = "rk4"
 
     # Simulate only until shortly after SECO, then stop. Orbital elements can be
     # computed from the state at cutoff (no need to coast to apoapsis), and
@@ -233,14 +236,16 @@ def run_simulation_wrapper(
     # Allow callers (e.g., final evaluation) to override fidelity.
     if dt_s is not None:
         cfg_sim.main_dt_s = float(dt_s)
-        # Use RK4 for fine timesteps to reduce numerical noise during polishing.
-        if cfg_sim.main_dt_s <= 0.25:
+        # For phase 1 we keep velocity_verlet for speed unless the caller
+        # requests a fine timestep; phase 2 always uses RK4 (set above).
+        if phase == 1 and cfg_sim.main_dt_s <= 0.25:
             cfg_sim.integrator = "rk4"
     if duration_s is not None:
         cfg_sim.main_duration_s = float(duration_s)
 
     # Initialize results with a default "CRASH" status in case the simulation fails early
     results = {"fuel": 0.0, "status": "INIT", "cost": PENALTY_CRASH}
+    sim_log = None
     
     try:
         sim, state0, t0, _log_config, _analysis_config = main_orchestrator(
@@ -253,10 +258,10 @@ def run_simulation_wrapper(
         initial_mass = state0.m # Capture initial mass after orchestration
 
         # Run simulation (dt/duration tuned above)
-        log = sim.run(t0, duration=float(cfg_sim.main_duration_s), dt=float(cfg_sim.main_dt_s), state0=state0)
-        max_altitude = max(log.altitude) if log.altitude else 0.0 # Get max altitude for evaluation
+        sim_log = sim.run(t0, duration=float(cfg_sim.main_duration_s), dt=float(cfg_sim.main_dt_s), state0=state0)
+        max_altitude = max(sim_log.altitude) if sim_log.altitude else 0.0 # Get max altitude for evaluation
 
-        results = evaluate_simulation_results(log, initial_mass, cfg_env, cfg_sim, max_altitude, phase)
+        results = evaluate_simulation_results(sim_log, initial_mass, cfg_env, cfg_sim, max_altitude, phase)
 
     except IndexError:
         results["status"] = "SIM_FAIL_INDEX"
@@ -264,6 +269,117 @@ def run_simulation_wrapper(
         results["status"] = "SIM_FAIL_UNKNOWN"
         print(f"Simulation wrapper encountered an unexpected error: {traceback.format_exc()}", flush=True) # Added more detailed error logging
     
+    # Optional: estimate a circularization burn at apoapsis (Phase 2).
+    #
+    # The log shows the optimizer commonly reaches an orbit with apoapsis near the
+    # target altitude but with a much lower perigee. A small prograde burn at
+    # apoapsis can circularize that transfer orbit; we account for that extra
+    # propellant here so Phase 2 can genuinely minimize *total* propellant to the
+    # final LEO.
+    if phase == 2 and sim_log is not None:
+        enable_circ = str(os.getenv("ORBITLAUNCH_ESTIMATE_APOAPSIS_CIRCULARIZATION", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        if enable_circ:
+            try:
+                pre_status = str(results.get("status", "UNKNOWN"))
+                is_survivable = pre_status in {"OK", "GOOD", "PERFECT"}
+                perigee_pre = float(results.get("perigee_alt_m", float("-inf")) or float("-inf"))
+                apo_pre = float(results.get("apoapsis_alt_m", float("-inf")) or float("-inf"))
+
+                if is_survivable and np.isfinite(perigee_pre) and np.isfinite(apo_pre):
+                    from Analysis.cost_functions import PERIGEE_FLOOR_M, TARGET_TOLERANCE_M, calculate_cost
+
+                    # Only attempt circularization if the pre-circularization orbit
+                    # is survivable to apoapsis (otherwise we'd re-enter before the burn).
+                    if perigee_pre >= PERIGEE_FLOOR_M:
+                        idx_eval = int(results.get("eval_index", len(getattr(sim_log, "m", [])) - 1))
+                        m_hist = getattr(sim_log, "m", None)
+                        stage_hist = getattr(sim_log, "stage", None)
+                        if not m_hist:
+                            raise ValueError("simulation log missing mass history")
+                        idx_eval = max(0, min(idx_eval, len(m_hist) - 1))
+                        mass_eval_kg = float(m_hist[idx_eval])
+                        stage_eval = int(stage_hist[idx_eval]) if stage_hist and idx_eval < len(stage_hist) else None
+
+                        rp_m = float(results.get("rp_m", float("nan")))
+                        ra_m = float(results.get("ra_m", float("nan")))
+                        if np.isfinite(rp_m) and np.isfinite(ra_m) and rp_m > 0.0 and ra_m > 0.0:
+                            a_m = 0.5 * (rp_m + ra_m)
+                            if a_m > 0.0:
+                                mu = float(cfg_env.earth_mu)
+                                v_apo = float(np.sqrt(mu * (2.0 / ra_m - 1.0 / a_m)))
+                                v_circ = float(np.sqrt(mu / ra_m))
+                                dv_circ = abs(v_circ - v_apo)
+
+                                g0 = 9.80665
+                                isp_vac = float(getattr(cfg_hw, "upper_isp_vac", 0.0) or 0.0)
+                                if isp_vac <= 0.0:
+                                    raise ValueError("upper_isp_vac must be > 0 to estimate circularization fuel")
+
+                                fuel_main = max(0.0, float(results.get("fuel", 0.0) or 0.0))
+                                fuel_circ = float(mass_eval_kg * (1.0 - np.exp(-dv_circ / (g0 * isp_vac))))
+                                fuel_circ = max(0.0, fuel_circ)
+
+                                # Very rough feasibility check (payload is folded into dry mass in this model).
+                                prop_remaining_est = max(0.0, mass_eval_kg - float(getattr(cfg_hw, "upper_dry_mass", 0.0)))
+                                circ_feasible = fuel_circ <= prop_remaining_est + 1e-6
+
+                                # Preserve pre-circularization values for debugging/logging.
+                                results["status_pre_circ"] = pre_status
+                                results["perigee_alt_pre_circ_m"] = float(perigee_pre)
+                                results["apoapsis_alt_pre_circ_m"] = float(apo_pre)
+                                results["eccentricity_pre_circ"] = float(results.get("eccentricity", 0.0) or 0.0)
+                                results["orbit_error_pre_circ_m"] = float(results.get("orbital_error", float("nan")))
+
+                                results["circ_applied"] = bool(circ_feasible)
+                                results["circ_dv_mps"] = float(dv_circ)
+                                results["fuel_main_kg"] = float(fuel_main)
+                                results["fuel_circ_kg"] = float(fuel_circ)
+                                results["fuel_total_kg"] = float(fuel_main + fuel_circ)
+                                results["mass_eval_kg"] = float(mass_eval_kg)
+                                if stage_eval is not None:
+                                    results["stage_eval"] = int(stage_eval)
+
+                                if circ_feasible:
+                                    # After circularization at apoapsis, the orbit is circular at ra.
+                                    perigee_post = float(apo_pre)
+                                    results["perigee_alt_m"] = perigee_post
+                                    results["apoapsis_alt_m"] = perigee_post
+                                    results["eccentricity"] = 0.0
+
+                                    target_r = float(cfg_env.earth_radius_m) + float(cfg_sim.target_orbit_alt_m)
+                                    ra_error = abs(float(ra_m) - target_r)
+
+                                    results["perigee_error_m"] = float(ra_error)
+                                    results["apoapsis_error_m"] = float(ra_error)
+                                    results["orbital_error"] = float(ra_error)
+
+                                    if results["orbital_error"] < TARGET_TOLERANCE_M * 0.5:
+                                        results["status"] = "PERFECT"
+                                    elif results["orbital_error"] < TARGET_TOLERANCE_M * 2:
+                                        results["status"] = "GOOD"
+                                    else:
+                                        results["status"] = "OK"
+
+                                    # For Phase 2, optimize total propellant including circularization.
+                                    results["fuel"] = float(results["fuel_total_kg"])
+                                    results["cost"] = calculate_cost(
+                                        results, phase, cfg_sim.target_orbit_alt_m, cfg_env.earth_radius_m
+                                    )
+                                else:
+                                    # Cannot circularize with remaining propellant -> treat as a hard failure.
+                                    results["status"] = "SUBORBIT"
+                                    results["orbital_error"] = float(PENALTY_CRASH)
+                                    results["cost"] = float(PENALTY_CRASH)
+            except Exception:
+                # Keep the optimizer robust: if circularization estimation fails,
+                # just fall back to the raw simulation metrics.
+                pass
+
     # Ensure cost is present in results, even in failure cases not caught by evaluate_simulation_results
     if 'cost' not in results:
         # This will use the new calculate_cost function via evaluate_simulation_results
@@ -281,6 +397,8 @@ def run_simulation_wrapper(
         else:
             results['cost'] = PENALTY_CRASH
 
+    if return_log:
+        results["log"] = sim_log
     return results
 
 
@@ -772,6 +890,131 @@ def run_optimization():
         f"Upper Burn={final_params2[12]:.1f}s. Full details in {LOG_FILENAME}",
         flush=True,
     )
+
+    # --- Final trajectory plot + summary ---
+    plot_final = str(os.getenv("ORBITLAUNCH_PLOT_FINAL", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    animate_final = str(os.getenv("ORBITLAUNCH_ANIMATE_FINAL", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    if plot_final or animate_final:
+        from Analysis.plotting import plot_trajectory_3d, animate_trajectory
+
+        final_dt_s = _env_float("ORBITLAUNCH_FINAL_DT_S", 0.25)
+        final_duration_s = _env_float("ORBITLAUNCH_FINAL_DURATION_S", 6000.0)
+        final_dt_s = max(1e-4, float(final_dt_s))
+        final_duration_s = max(1.0, float(final_duration_s))
+
+        print(
+            f"\n=== FINAL TRAJECTORY (dt={final_dt_s:.3f}s, duration={final_duration_s:.0f}s) ===",
+            flush=True,
+        )
+        final_traj_results = run_simulation_wrapper(
+            final_params2,
+            env_config,
+            hw_config,
+            sw_config,
+            sim_config,
+            log_config,
+            phase=2,
+            dt_s=final_dt_s,
+            duration_s=final_duration_s,
+            return_log=True,
+        )
+        final_log = final_traj_results.get("log")
+        if final_log is None:
+            print(
+                f"Final plot skipped: simulation log unavailable (status={final_traj_results.get('status', 'UNKNOWN')})",
+                flush=True,
+            )
+            return
+
+        # Print a concise summary at the end of the program.
+        try:
+            final_time_s = float(final_log.t_sim[-1]) if final_log.t_sim else 0.0
+            final_alt_km = (
+                (float(np.linalg.norm(final_log.r[-1])) - float(env_config.earth_radius_m)) / 1000.0
+                if getattr(final_log, "r", None)
+                else 0.0
+            )
+            final_speed_mps = float(np.linalg.norm(final_log.v[-1])) if getattr(final_log, "v", None) else 0.0
+            final_mass_kg = float(final_log.m[-1]) if getattr(final_log, "m", None) else 0.0
+            max_alt_km = (float(max(final_log.altitude)) / 1000.0) if getattr(final_log, "altitude", None) else 0.0
+            max_q_kpa = (float(max(final_log.dynamic_pressure)) / 1000.0) if getattr(final_log, "dynamic_pressure", None) else 0.0
+
+            stage_switch_times = []
+            if getattr(final_log, "stage", None) and getattr(final_log, "t_sim", None):
+                stage_switch_times = [
+                    float(final_log.t_sim[i])
+                    for i in range(1, min(len(final_log.stage), len(final_log.t_sim)))
+                    if final_log.stage[i] != final_log.stage[i - 1]
+                ]
+
+            per_km = float(final_traj_results.get("perigee_alt_m", float("nan"))) / 1000.0
+            apo_km = float(final_traj_results.get("apoapsis_alt_m", float("nan"))) / 1000.0
+            ecc = float(final_traj_results.get("eccentricity", float("nan")))
+            err_km = float(final_traj_results.get("orbital_error", float("nan"))) / 1000.0
+
+            circ_applied = bool(final_traj_results.get("circ_applied", False))
+            per_pre_km = float(final_traj_results.get("perigee_alt_pre_circ_m", float("nan"))) / 1000.0
+            apo_pre_km = float(final_traj_results.get("apoapsis_alt_pre_circ_m", float("nan"))) / 1000.0
+            ecc_pre = float(final_traj_results.get("eccentricity_pre_circ", float("nan")))
+            err_pre_km = float(final_traj_results.get("orbit_error_pre_circ_m", float("nan"))) / 1000.0
+            dv_circ = float(final_traj_results.get("circ_dv_mps", float("nan")))
+            fuel_main_kg = float(final_traj_results.get("fuel_main_kg", float("nan")))
+            fuel_circ_kg = float(final_traj_results.get("fuel_circ_kg", float("nan")))
+            fuel_kg = float(final_traj_results.get("fuel", float("nan")))
+            cutoff_reason = str(final_traj_results.get("cutoff_reason", "") or "")
+            status = str(final_traj_results.get("status", "UNKNOWN"))
+
+            # Optional orbital period estimate (elliptical orbits only).
+            a_m = None
+            try:
+                rp_m = float(final_traj_results.get("rp_m", float("nan")))
+                ra_m = float(final_traj_results.get("ra_m", float("nan")))
+                if np.isfinite(rp_m) and np.isfinite(ra_m) and rp_m > 0.0 and ra_m > 0.0:
+                    a_m = 0.5 * (rp_m + ra_m)
+            except Exception:
+                a_m = None
+            period_s = None
+            if a_m is not None and a_m > 0.0:
+                period_s = float(2.0 * np.pi * np.sqrt(a_m**3 / float(env_config.earth_mu)))
+
+            print("\n--- Final Trajectory Summary ---", flush=True)
+            print(f"Status: {status} | Cutoff: {cutoff_reason}", flush=True)
+            print(f"t_end: {final_time_s:.1f} s | Max alt: {max_alt_km:.1f} km | Max Q: {max_q_kpa:.1f} kPa", flush=True)
+            print(
+                f"Final alt: {final_alt_km:.1f} km | Final speed: {final_speed_mps:.1f} m/s | Final mass: {final_mass_kg:.0f} kg",
+                flush=True,
+            )
+            if circ_applied:
+                print(
+                    f"Pre-circ: Perigee {per_pre_km:.1f} km | Apoapsis {apo_pre_km:.1f} km | e {ecc_pre:.4f} | Error {err_pre_km:.2f} km",
+                    flush=True,
+                )
+                print(
+                    f"Post-circ: Perigee {per_km:.1f} km | Apoapsis {apo_km:.1f} km | e {ecc:.4f} | Error {err_km:.2f} km",
+                    flush=True,
+                )
+                print(f"Circularization: Δv {dv_circ:.2f} m/s | Fuel {fuel_circ_kg:.1f} kg", flush=True)
+                if np.isfinite(fuel_main_kg):
+                    print(f"Propellant burned (total): {fuel_kg:.1f} kg (main {fuel_main_kg:.1f} kg)", flush=True)
+                else:
+                    print(f"Propellant burned (total): {fuel_kg:.1f} kg", flush=True)
+            else:
+                print(
+                    f"Perigee: {per_km:.1f} km | Apoapsis: {apo_km:.1f} km | e: {ecc:.4f} | Orbit error: {err_km:.2f} km",
+                    flush=True,
+                )
+                print(f"Propellant burned: {fuel_kg:.1f} kg", flush=True)
+            if stage_switch_times:
+                print(f"Stage switches at t={', '.join(f'{t:.1f}s' for t in stage_switch_times)}", flush=True)
+            if period_s is not None and np.isfinite(period_s):
+                print(f"Estimated orbital period: {period_s/60.0:.1f} min", flush=True)
+        except Exception:
+            print("WARNING: failed to print final trajectory summary.", flush=True)
+
+        if plot_final:
+            plot_trajectory_3d(final_log, env_config.earth_radius_m)
+        if animate_final:
+            animate_trajectory(final_log, env_config.earth_radius_m)
 
 
 if __name__ == "__main__":

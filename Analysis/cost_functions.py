@@ -275,7 +275,9 @@ def evaluate_simulation_results(
     apoapsis_error = abs(float(ra) - target_r)
     results["perigee_error_m"] = float(perigee_error)
     results["apoapsis_error_m"] = float(apoapsis_error)
-    results["orbital_error"] = float(perigee_error + apoapsis_error)
+    # Use the worst-axis error so `TARGET_TOLERANCE_M` directly corresponds to
+    # "within ±tolerance of the target altitude" for *both* perigee and apoapsis.
+    results["orbital_error"] = float(max(perigee_error, apoapsis_error))
 
     # Determine status based on outcome + orbital parameters.
     if results["cutoff_reason"] == "impact":

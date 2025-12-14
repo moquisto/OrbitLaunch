@@ -38,6 +38,10 @@ def _desired_header() -> list[str]:
         "booster_throttle_switch_ratio_0", "booster_throttle_switch_ratio_1", "booster_throttle_switch_ratio_2",
         "cost", "fuel", "orbit_error", "perigee_error_m", "apoapsis_error_m",
         "max_altitude_m", "cutoff_reason", "perigee_alt_m", "apoapsis_alt_m", "eccentricity",
+        # Optional Phase-2 circularization estimate (see `ORBITLAUNCH_ESTIMATE_APOAPSIS_CIRCULARIZATION`).
+        "fuel_main_kg", "fuel_circ_kg", "fuel_total_kg", "circ_dv_mps", "circ_applied",
+        "perigee_alt_pre_circ_m", "apoapsis_alt_pre_circ_m", "eccentricity_pre_circ", "orbit_error_pre_circ_m",
+        "status_pre_circ",
         "booster_pitch_program_sorted", "upper_pitch_program_sorted",
         "booster_throttle_schedule", "upper_throttle_schedule",
         "status",
@@ -73,6 +77,7 @@ def log_iteration(phase: str, iteration: int, params: OptimizationParams, result
     orbit_error = _float_or_nan(
         results.get("orbital_error", results.get("orbit_error", results.get("error", float("nan"))))
     )
+    orbit_error_pre = _float_or_nan(results.get("orbit_error_pre_circ_m", float("nan")))
 
     # Provide human-readable, effective schedules (sorted/expanded) to reduce confusion.
     booster_pitch_sorted = sorted(
@@ -183,6 +188,16 @@ def log_iteration(phase: str, iteration: int, params: OptimizationParams, result
             f"{_float_or_nan(results.get('perigee_alt_m', float('nan'))):.2f}",
             f"{_float_or_nan(results.get('apoapsis_alt_m', float('nan'))):.2f}",
             f"{_float_or_nan(results.get('eccentricity', float('nan'))):.6f}",
+            f"{_float_or_nan(results.get('fuel_main_kg', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('fuel_circ_kg', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('fuel_total_kg', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('circ_dv_mps', float('nan'))):.6f}",
+            "1" if results.get("circ_applied") else "0" if "circ_applied" in results else "",
+            f"{_float_or_nan(results.get('perigee_alt_pre_circ_m', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('apoapsis_alt_pre_circ_m', float('nan'))):.2f}",
+            f"{_float_or_nan(results.get('eccentricity_pre_circ', float('nan'))):.6f}",
+            f"{orbit_error_pre:.2f}",
+            str(results.get("status_pre_circ", "") or ""),
             _format_points(booster_pitch_sorted, t_digits=1, v_digits=1),
             _format_points(upper_pitch_sorted, t_digits=1, v_digits=1),
             _format_points(booster_throttle_schedule, t_digits=3, v_digits=3),
