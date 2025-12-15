@@ -271,15 +271,12 @@ def run_simulation_wrapper(
         results["status"] = "SIM_FAIL_UNKNOWN"
         print(f"Simulation wrapper encountered an unexpected error: {traceback.format_exc()}", flush=True) # Added more detailed error logging
     
-    # Optional: estimate a circularization burn at apoapsis (Phase 2).
+    # Optional: simulate a two-burn insertion by circularizing at apoapsis.
     #
-    # The log shows the optimizer commonly reaches an orbit with apoapsis near the
-    # target altitude but with a much lower perigee. A small prograde burn at
-    # apoapsis can circularize that transfer orbit; we account for that extra
-    # propellant here so Phase 2 can genuinely minimize *total* propellant to the
-    # final LEO.
-    if phase == 2 and sim_log is not None:
-        enable_circ = str(os.getenv("ORBITLAUNCH_ESTIMATE_APOAPSIS_CIRCULARIZATION", "1")).strip().lower() not in {
+    # This turns the "post-circ" approximation into an actual (impulsive) burn
+    # inside the trajectory returned by the program: burn -> coast -> circularize.
+    if sim_log is not None:
+        enable_circ = str(os.getenv("ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN", "1")).strip().lower() not in {
             "0",
             "false",
             "no",
@@ -287,101 +284,264 @@ def run_simulation_wrapper(
         }
         if enable_circ:
             try:
+                from Analysis.cost_functions import TARGET_TOLERANCE_M, calculate_cost
+
+                cutoff_reason_pre = str(results.get("cutoff_reason", "") or "")
                 pre_status = str(results.get("status", "UNKNOWN"))
-                is_survivable = pre_status in {"OK", "GOOD", "PERFECT"}
-                perigee_pre = float(results.get("perigee_alt_m", float("-inf")) or float("-inf"))
-                apo_pre = float(results.get("apoapsis_alt_m", float("-inf")) or float("-inf"))
+                perigee_pre = float(results.get("perigee_alt_m", float("nan")))
+                apo_pre = float(results.get("apoapsis_alt_m", float("nan")))
+                ecc_pre = float(results.get("eccentricity", float("nan")))
+                orbit_error_pre = float(results.get("orbital_error", float("nan")))
 
-                if is_survivable and np.isfinite(perigee_pre) and np.isfinite(apo_pre):
-                    from Analysis.cost_functions import PERIGEE_FLOOR_M, TARGET_TOLERANCE_M, calculate_cost
+                rp_m = float(results.get("rp_m", float("nan")))
+                ra_m = float(results.get("ra_m", float("nan")))
+                if np.isfinite(rp_m) and np.isfinite(ra_m) and rp_m > 0.0 and ra_m > 0.0:
+                    a_m = 0.5 * (rp_m + ra_m)
+                else:
+                    a_m = float("nan")
 
-                    # Only attempt circularization if the pre-circularization orbit
-                    # is survivable to apoapsis (otherwise we'd re-enter before the burn).
-                    if perigee_pre >= PERIGEE_FLOOR_M:
-                        idx_eval = int(results.get("eval_index", len(getattr(sim_log, "m", [])) - 1))
-                        m_hist = getattr(sim_log, "m", None)
-                        stage_hist = getattr(sim_log, "stage", None)
-                        if not m_hist:
-                            raise ValueError("simulation log missing mass history")
-                        idx_eval = max(0, min(idx_eval, len(m_hist) - 1))
-                        mass_eval_kg = float(m_hist[idx_eval])
-                        stage_eval = int(stage_hist[idx_eval]) if stage_hist and idx_eval < len(stage_hist) else None
+                # Only bound orbits have an apoapsis to circularize at.
+                if np.isfinite(a_m) and np.isfinite(ra_m) and a_m > 0.0:
+                    mu = float(cfg_env.earth_mu)
+                    v_apo = float(np.sqrt(max(0.0, mu * (2.0 / ra_m - 1.0 / a_m))))
+                    v_circ = float(np.sqrt(max(0.0, mu / ra_m)))
+                    dv_circ_signed = float(v_circ - v_apo)
+                    dv_circ = float(abs(dv_circ_signed))
 
-                        rp_m = float(results.get("rp_m", float("nan")))
-                        ra_m = float(results.get("ra_m", float("nan")))
-                        if np.isfinite(rp_m) and np.isfinite(ra_m) and rp_m > 0.0 and ra_m > 0.0:
-                            a_m = 0.5 * (rp_m + ra_m)
-                            if a_m > 0.0:
-                                mu = float(cfg_env.earth_mu)
-                                v_apo = float(np.sqrt(mu * (2.0 / ra_m - 1.0 / a_m)))
-                                v_circ = float(np.sqrt(mu / ra_m))
-                                dv_circ = abs(v_circ - v_apo)
+                    g0 = 9.80665
+                    isp_vac = float(getattr(cfg_hw, "upper_isp_vac", 0.0) or 0.0)
+                    if isp_vac <= 0.0:
+                        raise ValueError("upper_isp_vac must be > 0 to compute circularization fuel")
 
-                                g0 = 9.80665
-                                isp_vac = float(getattr(cfg_hw, "upper_isp_vac", 0.0) or 0.0)
-                                if isp_vac <= 0.0:
-                                    raise ValueError("upper_isp_vac must be > 0 to estimate circularization fuel")
+                    idx_eval = int(results.get("eval_index", len(getattr(sim_log, "m", [])) - 1))
+                    m_hist = getattr(sim_log, "m", None)
+                    stage_hist = getattr(sim_log, "stage", None)
+                    r_hist = getattr(sim_log, "r", None)
+                    v_hist = getattr(sim_log, "v", None)
+                    if not m_hist or not r_hist or not v_hist:
+                        raise ValueError("simulation log missing mass/state history")
+                    idx_eval = max(0, min(idx_eval, len(m_hist) - 1))
+                    mass_eval_kg = float(m_hist[idx_eval])
+                    stage_eval = int(stage_hist[idx_eval]) if stage_hist and idx_eval < len(stage_hist) else None
 
-                                fuel_main = max(0.0, float(results.get("fuel", 0.0) or 0.0))
-                                fuel_circ = float(mass_eval_kg * (1.0 - np.exp(-dv_circ / (g0 * isp_vac))))
-                                fuel_circ = max(0.0, fuel_circ)
+                    # If stage info is present and we're not on the upper stage, skip.
+                    if stage_eval is not None and stage_eval != 1:
+                        raise ValueError("circularization burn requires upper stage (stage==1)")
 
-                                # Very rough feasibility check (payload is folded into dry mass in this model).
-                                prop_remaining_est = max(0.0, mass_eval_kg - float(getattr(cfg_hw, "upper_dry_mass", 0.0)))
-                                circ_feasible = fuel_circ <= prop_remaining_est + 1e-6
+                    fuel_main = max(0.0, float(results.get("fuel", 0.0) or 0.0))
+                    fuel_circ = float(mass_eval_kg * (1.0 - np.exp(-dv_circ / (g0 * isp_vac))))
+                    fuel_circ = max(0.0, fuel_circ)
 
-                                # Preserve pre-circularization values for debugging/logging.
-                                results["status_pre_circ"] = pre_status
-                                results["perigee_alt_pre_circ_m"] = float(perigee_pre)
-                                results["apoapsis_alt_pre_circ_m"] = float(apo_pre)
-                                results["eccentricity_pre_circ"] = float(results.get("eccentricity", 0.0) or 0.0)
-                                results["orbit_error_pre_circ_m"] = float(results.get("orbital_error", float("nan")))
+                    # Feasibility check using the stage dry mass (payload is folded into dry mass in this model).
+                    upper_dry = float(getattr(cfg_hw, "upper_dry_mass", 0.0) or 0.0)
+                    prop_remaining_est = max(0.0, mass_eval_kg - upper_dry)
+                    circ_feasible = fuel_circ <= prop_remaining_est + 1e-6
 
-                                results["circ_applied"] = bool(circ_feasible)
-                                results["circ_dv_mps"] = float(dv_circ)
-                                results["fuel_main_kg"] = float(fuel_main)
-                                results["fuel_circ_kg"] = float(fuel_circ)
-                                results["fuel_total_kg"] = float(fuel_main + fuel_circ)
-                                results["mass_eval_kg"] = float(mass_eval_kg)
-                                if stage_eval is not None:
-                                    results["stage_eval"] = int(stage_eval)
+                    # Preserve pre-circularization values for debugging/logging.
+                    results["status_pre_circ"] = pre_status
+                    results["perigee_alt_pre_circ_m"] = float(perigee_pre) if np.isfinite(perigee_pre) else float("nan")
+                    results["apoapsis_alt_pre_circ_m"] = float(apo_pre) if np.isfinite(apo_pre) else float("nan")
+                    results["eccentricity_pre_circ"] = float(ecc_pre) if np.isfinite(ecc_pre) else float("nan")
+                    results["orbit_error_pre_circ_m"] = float(orbit_error_pre) if np.isfinite(orbit_error_pre) else float("nan")
 
-                                if circ_feasible:
-                                    # After circularization at apoapsis, the orbit is circular at ra.
-                                    perigee_post = float(apo_pre)
-                                    results["perigee_alt_m"] = perigee_post
-                                    results["apoapsis_alt_m"] = perigee_post
-                                    results["eccentricity"] = 0.0
-                                    results["rp_m"] = float(ra_m)
-                                    results["ra_m"] = float(ra_m)
+                    results["circ_applied"] = bool(circ_feasible)
+                    results["circ_dv_mps"] = float(dv_circ)
+                    results["fuel_main_kg"] = float(fuel_main)
+                    results["fuel_circ_kg"] = float(fuel_circ)
+                    results["fuel_total_kg"] = float(fuel_main + fuel_circ)
+                    results["mass_eval_kg"] = float(mass_eval_kg)
+                    if stage_eval is not None:
+                        results["stage_eval"] = int(stage_eval)
 
-                                    target_r = float(cfg_env.earth_radius_m) + float(cfg_sim.target_orbit_alt_m)
-                                    ra_error = abs(float(ra_m) - target_r)
+                    if circ_feasible:
+                        # After circularization at apoapsis, the orbit is circular at ra.
+                        alt_post = float(ra_m - float(cfg_env.earth_radius_m))
+                        results["perigee_alt_m"] = alt_post
+                        results["apoapsis_alt_m"] = alt_post
+                        results["eccentricity"] = 0.0
+                        results["rp_m"] = float(ra_m)
+                        results["ra_m"] = float(ra_m)
+                        results["cutoff_reason_pre_circ"] = cutoff_reason_pre
+                        if not cutoff_reason_pre or cutoff_reason_pre == "impact":
+                            results["cutoff_reason"] = "circ_applied"
 
-                                    results["perigee_error_m"] = float(ra_error)
-                                    results["apoapsis_error_m"] = float(ra_error)
-                                    results["orbital_error"] = float(ra_error)
+                        target_r = float(cfg_env.earth_radius_m) + float(cfg_sim.target_orbit_alt_m)
+                        ra_error = abs(float(ra_m) - target_r)
+                        results["perigee_error_m"] = float(ra_error)
+                        results["apoapsis_error_m"] = float(ra_error)
+                        results["orbital_error"] = float(ra_error)
 
-                                    if results["orbital_error"] < TARGET_TOLERANCE_M * 0.5:
-                                        results["status"] = "PERFECT"
-                                    elif results["orbital_error"] < TARGET_TOLERANCE_M * 2:
-                                        results["status"] = "GOOD"
-                                    else:
-                                        results["status"] = "OK"
+                        if results["orbital_error"] < TARGET_TOLERANCE_M * 0.5:
+                            results["status"] = "PERFECT"
+                        elif results["orbital_error"] < TARGET_TOLERANCE_M * 2:
+                            results["status"] = "GOOD"
+                        else:
+                            results["status"] = "OK"
 
-                                    # For Phase 2, optimize total propellant including circularization.
-                                    results["fuel"] = float(results["fuel_total_kg"])
-                                    results["cost"] = calculate_cost(
-                                        results, phase, cfg_sim.target_orbit_alt_m, cfg_env.earth_radius_m
-                                    )
+                        results["fuel"] = float(results["fuel_total_kg"])
+                        results["cost"] = calculate_cost(
+                            results, phase, cfg_sim.target_orbit_alt_m, cfg_env.earth_radius_m
+                        )
+
+                        # If requested, stitch the returned log so the final plot
+                        # shows the coast to apoapsis and the circular orbit after
+                        # the burn (two-body propagation).
+                        if return_log:
+                            try:
+                                from Main.telemetry import Logger
+
+                                def _copy_prefix(src: Logger, end_idx: int) -> Logger:
+                                    out = Logger()
+                                    n = max(0, int(end_idx) + 1)
+                                    for attr in out.__dict__.keys():
+                                        dst_val = getattr(out, attr, None)
+                                        src_val = getattr(src, attr, None)
+                                        if isinstance(dst_val, list) and isinstance(src_val, list):
+                                            setattr(out, attr, src_val[:n].copy())
+                                    out.orbit_achieved = bool(getattr(src, "orbit_achieved", False))
+                                    out.cutoff_reason = str(getattr(src, "cutoff_reason", "") or "")
+                                    return out
+
+                                def _rk4_two_body_step(r_m: np.ndarray, v_mps: np.ndarray, mu_val: float, dt_val: float):
+                                    def accel(rr: np.ndarray) -> np.ndarray:
+                                        r_norm = float(np.linalg.norm(rr))
+                                        return (-float(mu_val) * rr) / max(r_norm**3, 1e-9)
+
+                                    k1_r = v_mps
+                                    k1_v = accel(r_m)
+
+                                    r2 = r_m + 0.5 * dt_val * k1_r
+                                    v2 = v_mps + 0.5 * dt_val * k1_v
+                                    k2_r = v2
+                                    k2_v = accel(r2)
+
+                                    r3 = r_m + 0.5 * dt_val * k2_r
+                                    v3 = v_mps + 0.5 * dt_val * k2_v
+                                    k3_r = v3
+                                    k3_v = accel(r3)
+
+                                    r4 = r_m + dt_val * k3_r
+                                    v4 = v_mps + dt_val * k3_v
+                                    k4_r = v4
+                                    k4_v = accel(r4)
+
+                                    r_next = r_m + (dt_val / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
+                                    v_next = v_mps + (dt_val / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
+                                    return r_next, v_next
+
+                                # Find apoapsis after cutoff in the simulated log.
+                                idx_cutoff = int(results.get("eval_index", len(sim_log.t_sim) - 1))
+                                idx_cutoff = max(0, min(idx_cutoff, len(sim_log.t_sim) - 1))
+                                if getattr(sim_log, "altitude", None):
+                                    alt = np.asarray(sim_log.altitude, dtype=float)
+                                    n_alt = min(len(alt), len(sim_log.t_sim))
+                                    start = min(idx_cutoff, n_alt - 1)
+                                    idx_apo = start + int(np.argmax(alt[start:n_alt]))
                                 else:
-                                    # Cannot circularize with remaining propellant -> treat as a hard failure.
-                                    results["status"] = "SUBORBIT"
-                                    results["orbital_error"] = float(PENALTY_CRASH)
-                                    results["cost"] = float(PENALTY_CRASH)
+                                    r_norms = np.array([float(np.linalg.norm(r)) for r in sim_log.r], dtype=float)
+                                    start = min(idx_cutoff, len(r_norms) - 1)
+                                    idx_apo = start + int(np.argmax(r_norms[start:]))
+                                idx_apo = max(0, min(idx_apo, len(sim_log.t_sim) - 1))
+
+                                stitched = _copy_prefix(sim_log, idx_apo)
+                                stitched.cutoff_reason = "circ_applied"
+                                stitched.orbit_achieved = True
+
+                                r_apo_vec = np.asarray(stitched.r[-1], dtype=float)
+                                v_apo_vec = np.asarray(stitched.v[-1], dtype=float)
+                                r_norm = float(np.linalg.norm(r_apo_vec))
+                                if r_norm <= 0.0:
+                                    raise ValueError("invalid apoapsis state")
+                                r_hat = r_apo_vec / r_norm
+                                v_tan = v_apo_vec - float(np.dot(v_apo_vec, r_hat)) * r_hat
+                                v_tan_norm = float(np.linalg.norm(v_tan))
+                                if v_tan_norm <= 1e-9:
+                                    raise ValueError("apoapsis tangential velocity too small")
+                                tan_hat = v_tan / v_tan_norm
+                                v_circ_local = float(np.sqrt(mu / r_norm))
+                                v_post = tan_hat * v_circ_local
+
+                                mass_apo = float(stitched.m[-1])
+                                mass_post = max(0.0, mass_apo - fuel_circ)
+
+                                # Overwrite the apoapsis sample with the post-burn state.
+                                stitched.r[-1] = r_apo_vec.copy()
+                                stitched.v[-1] = v_post.copy()
+                                stitched.m[-1] = float(mass_post)
+                                stitched.stage[-1] = int(stitched.stage[-1]) if stitched.stage else 1
+                                if stitched.altitude:
+                                    stitched.altitude[-1] = float(r_norm - float(cfg_env.earth_radius_m))
+                                if stitched.speed:
+                                    stitched.speed[-1] = float(np.linalg.norm(v_post))
+                                if stitched.thrust_mag:
+                                    stitched.thrust_mag[-1] = 0.0
+                                if stitched.drag_mag:
+                                    stitched.drag_mag[-1] = 0.0
+                                if stitched.mdot:
+                                    stitched.mdot[-1] = 0.0
+                                if stitched.dynamic_pressure:
+                                    stitched.dynamic_pressure[-1] = 0.0
+                                if stitched.rho:
+                                    stitched.rho[-1] = 0.0
+                                if stitched.mach:
+                                    stitched.mach[-1] = 0.0
+
+                                # Propagate under two-body for the remainder of the horizon.
+                                t = float(stitched.t_sim[-1])
+                                t_end = float(cfg_sim.main_duration_s)
+                                dt_val = float(cfg_sim.main_dt_s)
+                                r_curr = r_apo_vec.copy()
+                                v_curr = v_post.copy()
+                                stage_val = int(stitched.stage[-1]) if stitched.stage else 1
+                                while t + dt_val <= t_end + 1e-9:
+                                    r_curr, v_curr = _rk4_two_body_step(r_curr, v_curr, mu, dt_val)
+                                    t = t + dt_val
+
+                                    stitched.t_sim.append(float(t))
+                                    stitched.t_env.append(float(t))
+                                    stitched.r.append(np.asarray(r_curr, dtype=float).copy())
+                                    stitched.v.append(np.asarray(v_curr, dtype=float).copy())
+                                    stitched.m.append(float(mass_post))
+                                    stitched.stage.append(stage_val)
+
+                                    r_norm_step = float(np.linalg.norm(r_curr))
+                                    altitude = r_norm_step - float(cfg_env.earth_radius_m)
+                                    speed = float(np.linalg.norm(v_curr))
+                                    r_hat_step = (
+                                        r_curr / r_norm_step
+                                        if r_norm_step > 0.0
+                                        else np.array([0.0, 0.0, 1.0], dtype=float)
+                                    )
+                                    v_vertical = float(np.dot(v_curr, r_hat_step)) if r_norm_step > 0.0 else 0.0
+                                    v_horizontal = float(np.sqrt(max(0.0, speed * speed - v_vertical * v_vertical)))
+                                    fpa_deg = (
+                                        float(np.degrees(np.arctan2(v_vertical, v_horizontal)))
+                                        if (v_horizontal > 0.0 or v_vertical != 0.0)
+                                        else 0.0
+                                    )
+                                    specific_energy = 0.5 * speed * speed - mu / max(r_norm_step, 1e-6)
+
+                                    stitched.altitude.append(float(altitude))
+                                    stitched.speed.append(float(speed))
+                                    stitched.thrust_mag.append(0.0)
+                                    stitched.drag_mag.append(0.0)
+                                    stitched.mdot.append(0.0)
+                                    stitched.dynamic_pressure.append(0.0)
+                                    stitched.rho.append(0.0)
+                                    stitched.mach.append(0.0)
+                                    stitched.flight_path_angle_deg.append(float(fpa_deg))
+                                    stitched.v_vertical.append(float(v_vertical))
+                                    stitched.v_horizontal.append(float(v_horizontal))
+                                    stitched.specific_energy.append(float(specific_energy))
+
+                                sim_log = stitched
+                            except Exception:
+                                pass
+                    else:
+                        # Cannot circularize with remaining propellant -> keep the raw simulation.
+                        results["circ_applied"] = False
             except Exception:
-                # Keep the optimizer robust: if circularization estimation fails,
-                # just fall back to the raw simulation metrics.
+                # Keep the optimizer robust: if circularization logic fails, fall back to raw simulation metrics.
                 pass
 
     # Ensure cost is present in results, even in failure cases not caught by evaluate_simulation_results
@@ -931,199 +1091,6 @@ def run_optimization():
             )
             return
 
-        # For final presentation, optionally apply the estimated apoapsis
-        # circularization burn and propagate the circular orbit segment under a
-        # simple two-body model. This makes the plotted trajectory match the
-        # post-circularization orbit metrics used by Phase 2.
-        circ_applied = bool(final_traj_results.get("circ_applied", False))
-        apply_circ_to_plot = str(os.getenv("ORBITLAUNCH_APPLY_CIRCULARIZATION_TO_PLOT", "1")).strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
-        if circ_applied and apply_circ_to_plot:
-            try:
-                from Main.telemetry import Logger
-
-                def _copy_prefix(src: Logger, end_idx: int) -> Logger:
-                    out = Logger()
-                    n = max(0, int(end_idx) + 1)
-                    for attr in out.__dict__.keys():
-                        dst_val = getattr(out, attr, None)
-                        src_val = getattr(src, attr, None)
-                        if isinstance(dst_val, list) and isinstance(src_val, list):
-                            setattr(out, attr, src_val[:n].copy())
-                    out.orbit_achieved = bool(getattr(src, "orbit_achieved", False))
-                    out.cutoff_reason = str(getattr(src, "cutoff_reason", "") or "")
-                    return out
-
-                def _recompute_point_fields(
-                    out: Logger,
-                    *,
-                    earth_radius_m: float,
-                    mu: float,
-                    stage: int,
-                    mass_kg: float,
-                    r_m: np.ndarray,
-                    v_mps: np.ndarray,
-                ) -> None:
-                    r_norm = float(np.linalg.norm(r_m))
-                    v_norm = float(np.linalg.norm(v_mps))
-                    altitude = r_norm - float(earth_radius_m)
-                    r_hat = r_m / r_norm if r_norm > 0.0 else np.array([0.0, 0.0, 1.0], dtype=float)
-                    v_vertical = float(np.dot(v_mps, r_hat)) if r_norm > 0.0 else 0.0
-                    v_horizontal = float(np.sqrt(max(0.0, v_norm * v_norm - v_vertical * v_vertical)))
-                    fpa_deg = (
-                        float(np.degrees(np.arctan2(v_vertical, v_horizontal)))
-                        if (v_horizontal > 0.0 or v_vertical != 0.0)
-                        else 0.0
-                    )
-                    specific_energy = 0.5 * v_norm * v_norm - float(mu) / max(r_norm, 1e-6)
-
-                    out.r[-1] = np.asarray(r_m, dtype=float).copy()
-                    out.v[-1] = np.asarray(v_mps, dtype=float).copy()
-                    out.m[-1] = float(mass_kg)
-                    out.stage[-1] = int(stage)
-                    out.altitude[-1] = float(altitude)
-                    out.speed[-1] = float(v_norm)
-                    out.thrust_mag[-1] = 0.0
-                    out.drag_mag[-1] = 0.0
-                    out.mdot[-1] = 0.0
-                    out.dynamic_pressure[-1] = 0.0
-                    out.rho[-1] = 0.0
-                    out.mach[-1] = 0.0
-                    out.flight_path_angle_deg[-1] = float(fpa_deg)
-                    out.v_vertical[-1] = float(v_vertical)
-                    out.v_horizontal[-1] = float(v_horizontal)
-                    out.specific_energy[-1] = float(specific_energy)
-
-                def _rk4_two_body_step(r_m: np.ndarray, v_mps: np.ndarray, mu: float, dt: float):
-                    def accel(rr: np.ndarray) -> np.ndarray:
-                        r_norm = float(np.linalg.norm(rr))
-                        return (-float(mu) * rr) / max(r_norm**3, 1e-9)
-
-                    k1_r = v_mps
-                    k1_v = accel(r_m)
-
-                    r2 = r_m + 0.5 * dt * k1_r
-                    v2 = v_mps + 0.5 * dt * k1_v
-                    k2_r = v2
-                    k2_v = accel(r2)
-
-                    r3 = r_m + 0.5 * dt * k2_r
-                    v3 = v_mps + 0.5 * dt * k2_v
-                    k3_r = v3
-                    k3_v = accel(r3)
-
-                    r4 = r_m + dt * k3_r
-                    v4 = v_mps + dt * k3_v
-                    k4_r = v4
-                    k4_v = accel(r4)
-
-                    r_next = r_m + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
-                    v_next = v_mps + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
-                    return r_next, v_next
-
-                mu = float(env_config.earth_mu)
-                earth_radius = float(env_config.earth_radius_m)
-                dt = float(final_dt_s)
-                t_end = float(final_duration_s)
-
-                idx_cutoff = int(final_traj_results.get("eval_index", len(getattr(final_log, "t_sim", [])) - 1))
-                idx_cutoff = max(0, min(idx_cutoff, len(final_log.t_sim) - 1))
-
-                if getattr(final_log, "altitude", None):
-                    alt = np.asarray(final_log.altitude, dtype=float)
-                    n_alt = min(len(alt), len(final_log.t_sim))
-                    start = min(idx_cutoff, n_alt - 1)
-                    idx_apo = start + int(np.argmax(alt[start:n_alt]))
-                else:
-                    r_norms = np.array([float(np.linalg.norm(r)) for r in final_log.r], dtype=float)
-                    start = min(idx_cutoff, len(r_norms) - 1)
-                    idx_apo = start + int(np.argmax(r_norms[start:]))
-                idx_apo = max(0, min(idx_apo, len(final_log.t_sim) - 1))
-
-                # Copy everything up to apoapsis, then overwrite that last sample with the
-                # post-burn state and propagate a circular orbit segment.
-                stitched = _copy_prefix(final_log, idx_apo)
-
-                r_apo = np.asarray(stitched.r[-1], dtype=float)
-                v_apo = np.asarray(stitched.v[-1], dtype=float)
-                r_norm = float(np.linalg.norm(r_apo))
-                if r_norm <= 0.0:
-                    raise ValueError("invalid apoapsis state")
-                r_hat = r_apo / r_norm
-                v_tan = v_apo - float(np.dot(v_apo, r_hat)) * r_hat
-                v_tan_norm = float(np.linalg.norm(v_tan))
-                if v_tan_norm <= 1e-9:
-                    raise ValueError("apoapsis tangential velocity too small")
-
-                tan_hat = v_tan / v_tan_norm
-                v_circ = float(np.sqrt(mu / r_norm))
-                v_post = tan_hat * v_circ
-
-                mass_apo = float(stitched.m[-1])
-                fuel_circ = float(final_traj_results.get("fuel_circ_kg", float("nan")))
-                mass_post = max(0.0, mass_apo - fuel_circ) if np.isfinite(fuel_circ) else mass_apo
-                stage = int(stitched.stage[-1]) if stitched.stage else 1
-
-                _recompute_point_fields(
-                    stitched,
-                    earth_radius_m=earth_radius,
-                    mu=mu,
-                    stage=stage,
-                    mass_kg=mass_post,
-                    r_m=r_apo,
-                    v_mps=v_post,
-                )
-
-                t = float(stitched.t_sim[-1])
-                r_curr = np.asarray(r_apo, dtype=float)
-                v_curr = np.asarray(v_post, dtype=float)
-                while t + dt <= t_end + 1e-9:
-                    r_curr, v_curr = _rk4_two_body_step(r_curr, v_curr, mu, dt)
-                    t = t + dt
-
-                    stitched.t_sim.append(float(t))
-                    stitched.t_env.append(float(t))
-                    stitched.r.append(np.asarray(r_curr, dtype=float).copy())
-                    stitched.v.append(np.asarray(v_curr, dtype=float).copy())
-                    stitched.m.append(float(mass_post))
-                    stitched.stage.append(int(stage))
-
-                    r_norm_step = float(np.linalg.norm(r_curr))
-                    altitude = r_norm_step - earth_radius
-                    speed = float(np.linalg.norm(v_curr))
-                    r_hat_step = r_curr / r_norm_step if r_norm_step > 0.0 else np.array([0.0, 0.0, 1.0], dtype=float)
-                    v_vertical = float(np.dot(v_curr, r_hat_step)) if r_norm_step > 0.0 else 0.0
-                    v_horizontal = float(np.sqrt(max(0.0, speed * speed - v_vertical * v_vertical)))
-                    fpa_deg = (
-                        float(np.degrees(np.arctan2(v_vertical, v_horizontal)))
-                        if (v_horizontal > 0.0 or v_vertical != 0.0)
-                        else 0.0
-                    )
-                    specific_energy = 0.5 * speed * speed - mu / max(r_norm_step, 1e-6)
-
-                    stitched.altitude.append(float(altitude))
-                    stitched.speed.append(float(speed))
-                    stitched.thrust_mag.append(0.0)
-                    stitched.drag_mag.append(0.0)
-                    stitched.mdot.append(0.0)
-                    stitched.dynamic_pressure.append(0.0)
-                    stitched.rho.append(0.0)
-                    stitched.mach.append(0.0)
-                    stitched.flight_path_angle_deg.append(float(fpa_deg))
-                    stitched.v_vertical.append(float(v_vertical))
-                    stitched.v_horizontal.append(float(v_horizontal))
-                    stitched.specific_energy.append(float(specific_energy))
-
-                final_log = stitched
-            except Exception:
-                # Keep plotting robust even if the orbit stitching fails; fall back
-                # to the raw simulation trajectory.
-                pass
-
         # Print a concise summary at the end of the program.
         try:
             final_time_s = float(final_log.t_sim[-1]) if final_log.t_sim else 0.0
@@ -1182,26 +1149,36 @@ def run_optimization():
                 f"Final alt: {final_alt_km:.1f} km | Final speed: {final_speed_mps:.1f} m/s | Final mass: {final_mass_kg:.0f} kg",
                 flush=True,
             )
-            if circ_applied:
-                print(
-                    f"Pre-circ: Perigee {per_pre_km:.1f} km | Apoapsis {apo_pre_km:.1f} km | e {ecc_pre:.4f} | Error {err_pre_km:.2f} km",
-                    flush=True,
-                )
-                print(
-                    f"Post-circ: Perigee {per_km:.1f} km | Apoapsis {apo_km:.1f} km | e {ecc:.4f} | Error {err_km:.2f} km",
-                    flush=True,
-                )
+            print(
+                f"Perigee: {per_km:.1f} km | Apoapsis: {apo_km:.1f} km | e: {ecc:.4f} | Orbit error: {err_km:.2f} km",
+                flush=True,
+            )
+
+            print(f"Propellant burned: {fuel_kg:.1f} kg", flush=True)
+
+            print_fuel_breakdown = str(os.getenv("ORBITLAUNCH_PRINT_FUEL_BREAKDOWN", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if print_fuel_breakdown and circ_applied and np.isfinite(fuel_main_kg) and np.isfinite(fuel_circ_kg):
+                print(f"  - main burn: {fuel_main_kg:.1f} kg", flush=True)
+                print(f"  - circularization: {fuel_circ_kg:.1f} kg", flush=True)
+
+            print_circ_details = str(os.getenv("ORBITLAUNCH_PRINT_CIRC_DETAILS", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if print_circ_details and circ_applied:
                 print(f"Circularization: Δv {dv_circ:.2f} m/s | Fuel {fuel_circ_kg:.1f} kg", flush=True)
-                if np.isfinite(fuel_main_kg):
-                    print(f"Propellant burned (total): {fuel_kg:.1f} kg (main {fuel_main_kg:.1f} kg)", flush=True)
-                else:
-                    print(f"Propellant burned (total): {fuel_kg:.1f} kg", flush=True)
-            else:
-                print(
-                    f"Perigee: {per_km:.1f} km | Apoapsis: {apo_km:.1f} km | e: {ecc:.4f} | Orbit error: {err_km:.2f} km",
-                    flush=True,
-                )
-                print(f"Propellant burned: {fuel_kg:.1f} kg", flush=True)
+                if np.isfinite(per_pre_km) and np.isfinite(apo_pre_km) and np.isfinite(ecc_pre) and np.isfinite(err_pre_km):
+                    print(
+                        f"Pre-circ orbit: Perigee {per_pre_km:.1f} km | Apoapsis {apo_pre_km:.1f} km | e {ecc_pre:.4f} | Error {err_pre_km:.2f} km",
+                        flush=True,
+                    )
             if stage_switch_times:
                 print(f"Stage switches at t={', '.join(f'{t:.1f}s' for t in stage_switch_times)}", flush=True)
             if period_s is not None and np.isfinite(period_s):
