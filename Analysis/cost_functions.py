@@ -133,6 +133,8 @@ def calculate_cost(
     else: # Phase 2: Minimize fuel for a precise orbit.
         fuel_used = max(0.0, float(results.get("fuel", 0.0) or 0.0))
         orbital_error = results.get("orbital_error", PENALTY_CRASH)
+        perigee_error = results.get("perigee_error_m", orbital_error)
+        apoapsis_error = results.get("apoapsis_error_m", orbital_error)
         perigee_alt = float(results.get("perigee_alt_m", -np.inf) or -np.inf)
 
         # Enforce a minimum perigee even in phase 2 (otherwise "almost orbit" can
@@ -144,14 +146,26 @@ def calculate_cost(
         if not _is_finite_number(orbital_error):
             return float(PENALTY_CRASH)
         orbital_error = float(orbital_error)
-        
+
+        # Penalize both perigee and apoapsis errors (not just the worst-axis)
+        # to encourage true circularization around the target altitude.
+        if not _is_finite_number(perigee_error):
+            perigee_error = orbital_error
+        if not _is_finite_number(apoapsis_error):
+            apoapsis_error = orbital_error
+        perigee_error = float(perigee_error)
+        apoapsis_error = float(apoapsis_error)
+        orbit_shape_error = max(0.0, perigee_error) + max(0.0, apoapsis_error)
+
         # Always include a small orbit-accuracy term so the optimizer prefers the
         # exact target altitude, not just the edge of the tolerance band.
-        cost = fuel_used + orbital_error * ORBIT_ERROR_WEIGHT_IN_TOL
+        cost = fuel_used + orbit_shape_error * ORBIT_ERROR_WEIGHT_IN_TOL
 
-        # Outside the tolerance band, orbit accuracy must dominate fuel.
+        # Outside the tolerance band, orbit accuracy must dominate fuel. Use the
+        # combined error relative to the ±tolerance band on both axes.
         if orbital_error > TARGET_TOLERANCE_M:
-            cost += (orbital_error - TARGET_TOLERANCE_M) * ORBIT_ERROR_WEIGHT
+            shape_excess = max(0.0, orbit_shape_error - 2.0 * TARGET_TOLERANCE_M)
+            cost += shape_excess * ORBIT_ERROR_WEIGHT
 
         return float(cost)
 

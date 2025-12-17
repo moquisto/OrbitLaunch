@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import List, Tuple, Callable, Optional, Any, TYPE_CHECKING
+import os
 import numpy as np
 from Main.state import State
 # from .config import SoftwareConfig # Removed module-level import
@@ -312,6 +313,25 @@ def configure_software_for_optimization(
         switch_ratios=upper_throttle_switch_ratios,
         shutdown_after_burn=True,
     )
+
+    # Keep the last commanded upper-stage pitch angle active through SECO.
+    # Without this, if the pitch schedule ends early the guidance switches to
+    # prograde-following, removing a key degree of freedom for direct insertion.
+    hold_last_pitch = str(os.getenv("ORBITLAUNCH_UPPER_HOLD_LAST_PITCH_THROUGH_BURN", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if hold_last_pitch and pitch_points_upper:
+        upper_pitch_sorted = sorted(pitch_points_upper, key=lambda p: float(p[0]))
+        # The throttle schedule ramps down to zero at burn_duration + 1s.
+        burn_end_t = float(upper_burn_duration) + 1.0
+        last_t = float(upper_pitch_sorted[-1][0])
+        last_angle = float(upper_pitch_sorted[-1][1])
+        if last_t < burn_end_t:
+            upper_pitch_sorted.append([burn_end_t, last_angle])
+        pitch_points_upper = upper_pitch_sorted
 
     # Throttle program (booster)
     booster_throttle_levels = np.array([

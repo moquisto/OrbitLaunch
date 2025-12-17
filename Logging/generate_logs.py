@@ -38,7 +38,8 @@ def _desired_header() -> list[str]:
         "booster_throttle_switch_ratio_0", "booster_throttle_switch_ratio_1", "booster_throttle_switch_ratio_2",
         "cost", "fuel", "orbit_error", "perigee_error_m", "apoapsis_error_m",
         "max_altitude_m", "cutoff_reason", "perigee_alt_m", "apoapsis_alt_m", "eccentricity",
-        # Optional apoapsis circularization burn model (see `ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN`).
+        # Optional apoapsis circularization burn model (disabled by default; enable with
+        # `ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN=1`).
         "fuel_main_kg", "fuel_circ_kg", "fuel_total_kg", "circ_dv_mps", "circ_applied",
         "perigee_alt_pre_circ_m", "apoapsis_alt_pre_circ_m", "eccentricity_pre_circ", "orbit_error_pre_circ_m",
         "status_pre_circ",

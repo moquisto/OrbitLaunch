@@ -276,7 +276,10 @@ def run_simulation_wrapper(
     # This turns the "post-circ" approximation into an actual (impulsive) burn
     # inside the trajectory returned by the program: burn -> coast -> circularize.
     if sim_log is not None:
-        enable_circ = str(os.getenv("ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN", "1")).strip().lower() not in {
+        # Optional apoapsis circularization burn model. This is disabled by
+        # default because the intended baseline problem is single-burn direct
+        # insertion. Enable explicitly via env var if desired.
+        enable_circ = str(os.getenv("ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN", "0")).strip().lower() not in {
             "0",
             "false",
             "no",
@@ -709,16 +712,50 @@ def run_optimization():
         # so fixing it avoids wasting search effort.
         x[14] = 0.0
 
-        # Throttle schedules are largely redundant in this model because fuel is
-        # minimized via burn duration and the sim already enforces Max-Q/accel
-        # by scaling thrust. Fixing throttle cuts 14 dimensions.
-        x[21:25] = 1.0
-        x[25:28] = np.array([0.1, 0.5, 0.9], dtype=float)
-        x[28:32] = 1.0
-        x[32:35] = np.array([0.1, 0.5, 0.9], dtype=float)
+        # By default we allow the optimizer to shape the *upper-stage* throttle
+        # profile. This extra DOF is often required to achieve true direct
+        # insertion (both perigee and apoapsis at the target altitude) without a
+        # separate circularization burn.
+        optimize_upper_throttle = str(os.getenv("ORBITLAUNCH_OPTIMIZE_UPPER_THROTTLE", "1")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        optimize_booster_throttle = str(os.getenv("ORBITLAUNCH_OPTIMIZE_BOOSTER_THROTTLE", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        if not optimize_upper_throttle:
+            x[21:25] = 1.0
+            x[25:28] = np.array([0.1, 0.5, 0.9], dtype=float)
+
+        if not optimize_booster_throttle:
+            x[28:32] = 1.0
+            x[32:35] = np.array([0.1, 0.5, 0.9], dtype=float)
         return x
 
-    fixed_indices = {14, *range(21, 35)}
+    optimize_upper_throttle = str(os.getenv("ORBITLAUNCH_OPTIMIZE_UPPER_THROTTLE", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    optimize_booster_throttle = str(os.getenv("ORBITLAUNCH_OPTIMIZE_BOOSTER_THROTTLE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    fixed_indices = {14}
+    if not optimize_upper_throttle:
+        fixed_indices.update(range(21, 28))
+    if not optimize_booster_throttle:
+        fixed_indices.update(range(28, 35))
     active_indices = [i for i in range(35) if i not in fixed_indices]
 
     if analysis_config.optimizer_manual_seed and len(analysis_config.optimizer_manual_seed) == 35:
@@ -896,15 +933,23 @@ def run_optimization():
         enable_logging=True,
     )
 
-    if best1_orbit_error <= 200_000.0:
+    # NOTE: For direct insertion we often need to move substantially from the
+    # phase-1 solution to lift the perigee to the target altitude. Tightening
+    # too aggressively can trap the search in a local minimum where apoapsis is
+    # near-target but perigee remains low. Use a looser default tightening
+    # schedule unless phase 1 already got very close.
+    if best1_orbit_error <= 30_000.0:
         bounds2_unit_active = tighten_bounds_unit(bounds_active_unit, start2_unit_active, margin=0.15)
         sigma2 = 0.15
-    elif best1_orbit_error <= 1_000_000.0:
+    elif best1_orbit_error <= 200_000.0:
         bounds2_unit_active = tighten_bounds_unit(bounds_active_unit, start2_unit_active, margin=0.30)
         sigma2 = 0.25
+    elif best1_orbit_error <= 1_000_000.0:
+        bounds2_unit_active = tighten_bounds_unit(bounds_active_unit, start2_unit_active, margin=0.40)
+        sigma2 = 0.35
     else:
         bounds2_unit_active = bounds_active_unit
-        sigma2 = 0.35
+        sigma2 = 0.45
 
     phase2_coarse_maxiter = _env_int("ORBITLAUNCH_PHASE2_COARSE_MAXITER", 200)
     phase2_coarse_popsize = _env_int("ORBITLAUNCH_PHASE2_COARSE_POPSIZE", 16)
