@@ -1,22 +1,69 @@
 # OrbitLaunch
 
-Object-oriented 3D simulation of a two-stage rocket (BFR-inspired) launching from Earth to a target circular orbit. The goal is to search for a guidance profile that reaches a stable orbit at a chosen altitude while minimizing fuel consumption.
+Object-oriented 3D simulation of a two-stage rocket (BFR-inspired) launching from Earth to a target circular orbit. The goal is to search for a guidance profile that reaches a stable orbit at a chosen altitude (default: ~420 km LEO) while minimizing propellant burned.
 
 If you later draw a 2D cross-section of the orbit, the circular path will appear to pass through Earth's center because the orbital plane passes through the center; the orbit itself is always above the surface.
 
-## Current structure
-- **config.py**: Central configuration file for all simulation parameters.
-- **main.py**: Entry point for running a simulation. Includes a simple guidance system and plotting functions.
-- **simulation.py**: Core simulation class that integrates all the models and runs the simulation.
-- **rocket.py**: Rocket model, including engine performance, staging logic, and throttle schedule.
-- **atmosphere.py**: Combined atmosphere model using US Standard Atmosphere 1976 and NRLMSIS 2.1.
-- **gravity.py**: Earth gravity model, including the J2 perturbation.
-- **aerodynamics.py**: Aerodynamic drag model with a flexible drag coefficient model.
-- **integrators.py**: Implementations of RK4 and Velocity Verlet numerical integrators.
-- **optimise.py**: Placeholder for the optimization code.
+## Repo layout
+- **Environment/**: Earth model, atmosphere (`ussa1976` + `pymsis`), aerodynamics, and orbital element helpers.
+- **Hardware/**: Two-stage rocket model + engine parameters.
+- **Software/**: Guidance + event/staging logic.
+- **Main/**: Integrators and simulation loop.
+- **Analysis/**: Cost functions, plotting helpers, and the two-stage optimizer (`Analysis/optimization.py`).
+- **Logging/**: CSV logging utilities (optimizer logs + trajectory logs).
 
 ## Configuration
-All simulation parameters, including vehicle properties, target orbit, guidance parameters, and physical constants, can be modified in the `config.py` file.
+Configuration is split into dataclass configs per subsystem:
+- `Environment/config.py`, `Hardware/config.py`, `Software/config.py`, `Main/config.py`, `Logging/config.py`
+- Optimization parameterization and bounds live in `Analysis/config.py`
+
+## Running
+
+### Install dependencies
+This project expects Python 3 and the following packages:
+- simulation: `numpy`, `ussa1976`, `pymsis`
+- optimization: `scipy` (optional faster optimizer: `cma`)
+- for plotting: `matplotlib`
+- optional (tests): `pytest`
+
+Example:
+```bash
+python3 -m pip install numpy scipy ussa1976 pymsis matplotlib cma pytest
+```
+
+### Run a single simulation
+```bash
+python3 main.py
+```
+
+### Run the two-stage optimizer (direct insertion)
+```bash
+python3 Analysis/optimization.py
+```
+
+Outputs:
+- Optimizer CSV log: `optimization_twostage_log.csv` (override with `ORBITLAUNCH_LOG_FILENAME`)
+  - If the CSV header changes, the previous file is auto-moved to `optimization_twostage_log_legacy_<timestamp>.csv`.
+- Final plotted trajectory log (same data as the final plot): `trajectory_plots/final_trajectory_log.csv` (disable with `ORBITLAUNCH_SAVE_FINAL_TRAJ_LOG=0`)
+
+## Orbit evaluation (no “cheating”)
+Orbit quality is computed from the simulation’s state (ECI position/velocity), not by post-processing the trajectory into a better orbit.
+
+- The optimizer evaluates orbit at a single “evaluation” index near end-of-burn (or at max altitude for impact cases).
+- It computes osculating Kepler elements (two-body) from that state to get perigee/apoapsis.
+- The reported orbit error is `max(|perigee-target|, |apoapsis-target|)` so both must be within tolerance.
+
+### Direct insertion cutoff
+By default the simulation commands throttle to zero once both perigee and apoapsis are within tolerance:
+- `ORBITLAUNCH_DIRECT_INSERTION_CUTOFF=1` (default)
+- `ORBITLAUNCH_DIRECT_INSERTION_TOL_M=10000` (±10 km)
+
+## Useful environment variables
+- Optimizer iterations: `ORBITLAUNCH_PHASE1_MAXITER`, `ORBITLAUNCH_PHASE1_POPSIZE`, `ORBITLAUNCH_PHASE2_COARSE_MAXITER`, `ORBITLAUNCH_PHASE2_COARSE_POPSIZE`, `ORBITLAUNCH_PHASE2_POLISH_MAXITER`, `ORBITLAUNCH_PHASE2_POLISH_POPSIZE`
+- Timesteps: `ORBITLAUNCH_PHASE2_POLISH_DT_S`, `ORBITLAUNCH_FINAL_DT_S`, `ORBITLAUNCH_FINAL_EVAL_DT_S`, `ORBITLAUNCH_FINAL_DURATION_S`
+- Plot/log outputs: `ORBITLAUNCH_PLOT_FINAL`, `ORBITLAUNCH_ANIMATE_FINAL`, `ORBITLAUNCH_SAVE_FINAL_TRAJ_LOG`, `ORBITLAUNCH_FINAL_TRAJ_LOG_FILE`
+- What gets optimized: `ORBITLAUNCH_OPTIMIZE_UPPER_THROTTLE`, `ORBITLAUNCH_OPTIMIZE_BOOSTER_THROTTLE`
+- Upper-stage pitch behavior: `ORBITLAUNCH_UPPER_HOLD_LAST_PITCH_THROUGH_BURN`
 
 ## Simplifications (v1)
 To enable a focused study on rocket guidance and orbital mechanics, and to manage computational complexity, several simplifications have been made in this simulation. These choices allow for faster iteration and highlight the core physics relevant to achieving orbit, rather than getting bogged down in minute details. The primary goal is to provide a robust framework for testing guidance profiles and optimization strategies.
@@ -52,10 +99,10 @@ Numerics and optimization
 20. Parameterized guidance (pitch/throttle parameters) instead of full optimal control.
 
 Orbit target and stability notion  
-21. Circular orbit around spherical Earth: radius r = R_E + h_target in a plane through Earth's center, with correct speed and zero radial velocity at cutoff.  
+21. Orbit quality is evaluated from osculating (two-body) perigee/apoapsis computed from the simulated state near end-of-burn, targeting r = R_E + h_target.  
 22. Stability defined in the ideal two-body model: long-term J2, drag, and third bodies are neglected when defining stability.
 
 ## Next steps
-- Implement optimization algorithms in `optimise.py` to search for optimal guidance profiles.
-- Implement more advanced guidance strategies.
-- Add more detailed plotting and analysis tools.
+- Refine guidance parameterization (more late-burn control / shaping).
+- Add more detailed plotting/analysis tools and diagnostics.
+- Extend constraints and/or add higher-fidelity environmental effects as needed.

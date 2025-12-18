@@ -279,15 +279,8 @@ def run_simulation_wrapper(
     # This turns the "post-circ" approximation into an actual (impulsive) burn
     # inside the trajectory returned by the program: burn -> coast -> circularize.
     if sim_log is not None:
-        # Optional apoapsis circularization burn model. This is disabled by
-        # default because the intended baseline problem is single-burn direct
-        # insertion. Enable explicitly via env var if desired.
-        enable_circ = str(os.getenv("ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN", "0")).strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+        # Direct insertion only: disable the legacy apoapsis circularization model.
+        enable_circ = False
         if enable_circ:
             try:
                 from Analysis.cost_functions import TARGET_TOLERANCE_M, calculate_cost

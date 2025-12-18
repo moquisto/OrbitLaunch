@@ -42,8 +42,7 @@ def _desired_header() -> list[str]:
         # Orbit-evaluation snapshot (evaluated near end-of-burn / cutoff).
         "eval_t_sim_s", "eval_altitude_m", "eval_speed_mps", "eval_vr_mps", "eval_fpa_deg",
         "cutoff_reason", "perigee_alt_m", "apoapsis_alt_m", "eccentricity",
-        # Optional apoapsis circularization burn model (disabled by default; enable with
-        # `ORBITLAUNCH_SIMULATE_CIRCULARIZATION_BURN=1`).
+        # Legacy circularization fields (kept for log compatibility).
         "fuel_main_kg", "fuel_circ_kg", "fuel_total_kg", "circ_dv_mps", "circ_applied",
         "perigee_alt_pre_circ_m", "apoapsis_alt_pre_circ_m", "eccentricity_pre_circ", "orbit_error_pre_circ_m",
         "status_pre_circ",
