@@ -143,6 +143,7 @@ def test_run_simulation_wrapper_successful_orbit(mock_build_simulation_success, 
         30.0, 180.0, 10.0, 90.0,
         0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
+        , 300.0, 0.0
     ]
     
     results = run_simulation_wrapper(scaled_params, env_config, hw_config, sw_config, sim_config, log_config, phase=1)
@@ -161,6 +162,7 @@ def test_run_simulation_wrapper_crash_scenario(mock_build_simulation_crash, conf
         30.0, 180.0, 10.0, 90.0,
         0.0, 10.0, 60.0, 5.0, 180.0, 0.0,
         0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8, 0.9, 0.9, 0.9, 0.9, 0.2, 0.5, 0.8
+        , 300.0, 0.0
     ]
     
     results = run_simulation_wrapper(scaled_params, env_config, hw_config, sw_config, sim_config, log_config, phase=1)
@@ -182,9 +184,9 @@ def test_objective_phase1_success(mock_build_simulation_success, configs):
             sim_config=sim_config, 
             log_config=log_config, 
             analysis_config=analysis_config, 
-            bounds=[(-1e6, 1e6)] * 35
+            bounds=[(-1e6, 1e6)] * 37
         )
-        scaled_params = np.zeros(35)
+        scaled_params = np.zeros(37)
         cost = objective(scaled_params)
         assert cost == pytest.approx(200.0)
 
@@ -200,9 +202,9 @@ def test_objective_phase2_success(mock_build_simulation_success, configs):
             sim_config=sim_config, 
             log_config=log_config, 
             analysis_config=analysis_config, 
-            bounds=[(-1e6, 1e6)] * 35
+            bounds=[(-1e6, 1e6)] * 37
         )
-        scaled_params = np.zeros(35)
+        scaled_params = np.zeros(37)
         cost = objective(scaled_params)
         assert cost == pytest.approx(10000.0)
 

@@ -45,7 +45,7 @@ from Logging.config import LoggingConfig
 from Analysis.config import AnalysisConfig, OptimizationParams, OptimizationBounds # Import OptimizationBounds
 from Software.guidance import create_pitch_program_callable, ParameterizedThrottleProgram, configure_software_for_optimization
 from Logging.generate_logs import log_iteration, ensure_log_header, LOG_FILENAME # Import from logging module
-from Analysis.cost_functions import evaluate_simulation_results, PENALTY_CRASH # Import new function and PENALTY_CRASH
+from Analysis.cost_functions import evaluate_simulation_results, PENALTY_CRASH, TARGET_TOLERANCE_M # Import new function and constants
 
 # Shared counter for iteration tracking across processes
 global_iter_count = None
@@ -102,8 +102,11 @@ class ObjectiveFunctionWrapper:
                 base_vec = np.array(dataclasses.astuple(base_params_phys), dtype=float)
             else:
                 base_vec = np.asarray(base_params_phys, dtype=float)
-            if base_vec.shape[0] != 35:
-                raise ValueError(f"base_params_phys must have length 35, got {base_vec.shape[0]}")
+            expected_len = len(dataclasses.fields(OptimizationParams))
+            if base_vec.shape[0] != expected_len:
+                raise ValueError(
+                    f"base_params_phys must have length {expected_len}, got {base_vec.shape[0]}"
+                )
             self.base_params_phys = base_vec
         else:
             self.base_params_phys = None
@@ -653,6 +656,7 @@ def run_optimization():
     # --- Initial Guess & Bounds (SCALED) ---
     # The bounds are now managed centrally in Analysis/config.py
     bounds_phys_full = OptimizationBounds.get_bounds()
+    n_params = len(bounds_phys_full)
     lb_phys_full = np.array([b[0] for b in bounds_phys_full], dtype=float)
     ub_phys_full = np.array([b[1] for b in bounds_phys_full], dtype=float)
     span_phys_full = ub_phys_full - lb_phys_full
@@ -756,9 +760,9 @@ def run_optimization():
         fixed_indices.update(range(21, 28))
     if not optimize_booster_throttle:
         fixed_indices.update(range(28, 35))
-    active_indices = [i for i in range(35) if i not in fixed_indices]
+    active_indices = [i for i in range(n_params) if i not in fixed_indices]
 
-    if analysis_config.optimizer_manual_seed and len(analysis_config.optimizer_manual_seed) == 35:
+    if analysis_config.optimizer_manual_seed and len(analysis_config.optimizer_manual_seed) == n_params:
         start_params_phys_full = np.array(analysis_config.optimizer_manual_seed, dtype=float)
     else:
         start_params_phys_full = (lb_phys_full + ub_phys_full) / 2.0
@@ -1062,7 +1066,11 @@ def run_optimization():
 
     # Compare the polished solution to the best coarse/baseline solution at the
     # same (fine) fidelity before reporting final numbers.
-    eval_dt = _env_float("ORBITLAUNCH_FINAL_EVAL_DT_S", _env_float("ORBITLAUNCH_PHASE2_POLISH_DT_S", 0.25))
+    final_dt_default = _env_float(
+        "ORBITLAUNCH_FINAL_DT_S",
+        _env_float("ORBITLAUNCH_PHASE2_POLISH_DT_S", 0.25),
+    )
+    eval_dt = _env_float("ORBITLAUNCH_FINAL_EVAL_DT_S", final_dt_default)
     eval_dt = max(1e-4, float(eval_dt))
     candidate_results_polish = run_simulation_wrapper(
         final_params2,
@@ -1087,11 +1095,33 @@ def run_optimization():
     candidate_cost_polish = float(candidate_results_polish.get("cost", PENALTY_CRASH) or PENALTY_CRASH)
     candidate_cost_coarse = float(candidate_results_coarse.get("cost", PENALTY_CRASH) or PENALTY_CRASH)
 
-    if candidate_cost_coarse <= candidate_cost_polish:
+    err_polish = float(candidate_results_polish.get("orbital_error", PENALTY_CRASH) or PENALTY_CRASH)
+    err_coarse = float(candidate_results_coarse.get("orbital_error", PENALTY_CRASH) or PENALTY_CRASH)
+    fuel_polish = float(candidate_results_polish.get("fuel", float("inf")) or float("inf"))
+    fuel_coarse = float(candidate_results_coarse.get("fuel", float("inf")) or float("inf"))
+
+    within_polish = err_polish <= TARGET_TOLERANCE_M
+    within_coarse = err_coarse <= TARGET_TOLERANCE_M
+
+    if within_coarse and not within_polish:
         final_params2 = np.array(best2_phys_full, dtype=float, copy=True)
         final_results = candidate_results_coarse
-    else:
+    elif within_polish and not within_coarse:
         final_results = candidate_results_polish
+    elif within_polish and within_coarse:
+        # Both meet the orbit requirement -> minimize fuel.
+        if fuel_coarse <= fuel_polish:
+            final_params2 = np.array(best2_phys_full, dtype=float, copy=True)
+            final_results = candidate_results_coarse
+        else:
+            final_results = candidate_results_polish
+    else:
+        # Neither meets tolerance -> prefer smaller orbit error, then lower cost.
+        if err_coarse < err_polish or (err_coarse == err_polish and candidate_cost_coarse <= candidate_cost_polish):
+            final_params2 = np.array(best2_phys_full, dtype=float, copy=True)
+            final_results = candidate_results_coarse
+        else:
+            final_results = candidate_results_polish
 
     print(f"Final Fuel Used: {final_results['fuel']:.1f} kg", flush=True)
     print(f"Final Orbit Error: {final_results['orbital_error']/1000:.1f} km", flush=True)
@@ -1107,7 +1137,7 @@ def run_optimization():
     if plot_final or animate_final:
         from Analysis.plotting import plot_trajectory_3d, animate_trajectory
 
-        final_dt_s = _env_float("ORBITLAUNCH_FINAL_DT_S", 0.25)
+        final_dt_s = _env_float("ORBITLAUNCH_FINAL_DT_S", final_dt_default)
         final_duration_s = _env_float("ORBITLAUNCH_FINAL_DURATION_S", 6000.0)
         final_dt_s = max(1e-4, float(final_dt_s))
         final_duration_s = max(1.0, float(final_duration_s))
@@ -1135,6 +1165,24 @@ def run_optimization():
                 flush=True,
             )
             return
+
+        save_final_log = str(os.getenv("ORBITLAUNCH_SAVE_FINAL_TRAJ_LOG", "1")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if save_final_log:
+            try:
+                from Logging.generate_logs import save_log_to_txt
+
+                repo_root = Path(__file__).resolve().parents[1]
+                default_out = repo_root / "trajectory_plots" / "final_trajectory_log.csv"
+                out_path = Path(os.getenv("ORBITLAUNCH_FINAL_TRAJ_LOG_FILE", str(default_out)))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                save_log_to_txt(final_log, str(out_path))
+            except Exception:
+                print("WARNING: failed to save final trajectory log.", flush=True)
 
         # Print a concise summary at the end of the program.
         try:
@@ -1173,6 +1221,11 @@ def run_optimization():
             fuel_kg = float(final_traj_results.get("fuel", float("nan")))
             cutoff_reason = str(final_traj_results.get("cutoff_reason", "") or "")
             status = str(final_traj_results.get("status", "UNKNOWN"))
+            eval_t_s = float(final_traj_results.get("eval_t_sim_s", float("nan")))
+            eval_alt_km = float(final_traj_results.get("eval_altitude_m", float("nan"))) / 1000.0
+            eval_speed = float(final_traj_results.get("eval_speed_mps", float("nan")))
+            eval_vr = float(final_traj_results.get("eval_vr_mps", float("nan")))
+            eval_fpa = float(final_traj_results.get("eval_fpa_deg", float("nan")))
 
             # Optional orbital period estimate (elliptical orbits only).
             a_m = None
@@ -1189,6 +1242,11 @@ def run_optimization():
 
             print("\n--- Final Trajectory Summary ---", flush=True)
             print(f"Status: {status} | Cutoff: {cutoff_reason}", flush=True)
+            if np.isfinite(eval_t_s) and np.isfinite(eval_alt_km) and np.isfinite(eval_speed) and np.isfinite(eval_vr) and np.isfinite(eval_fpa):
+                print(
+                    f"Eval: t={eval_t_s:.1f} s | alt={eval_alt_km:.1f} km | speed={eval_speed:.1f} m/s | vr={eval_vr:.1f} m/s | fpa={eval_fpa:.2f} deg",
+                    flush=True,
+                )
             print(f"t_end: {final_time_s:.1f} s | Max alt: {max_alt_km:.1f} km | Max Q: {max_q_kpa:.1f} kPa", flush=True)
             print(
                 f"Final alt: {final_alt_km:.1f} km | Final speed: {final_speed_mps:.1f} m/s | Final mass: {final_mass_kg:.0f} kg",
@@ -1200,6 +1258,15 @@ def run_optimization():
             )
 
             print(f"Propellant burned: {fuel_kg:.1f} kg", flush=True)
+            try:
+                fuel_eval = float(final_results.get("fuel", float("nan")))
+                err_eval = float(final_results.get("orbital_error", float("nan")))
+                if np.isfinite(fuel_eval) and np.isfinite(fuel_kg) and abs(fuel_eval - fuel_kg) > 1.0:
+                    print(f"NOTE: fuel differs vs eval run by {fuel_kg - fuel_eval:+.1f} kg", flush=True)
+                if np.isfinite(err_eval) and np.isfinite(err_km) and abs(err_eval / 1000.0 - err_km) > 0.05:
+                    print(f"NOTE: orbit error differs vs eval run by {err_km - err_eval/1000.0:+.2f} km", flush=True)
+            except Exception:
+                pass
 
             print_fuel_breakdown = str(os.getenv("ORBITLAUNCH_PRINT_FUEL_BREAKDOWN", "0")).strip().lower() in {
                 "1",
@@ -1232,7 +1299,7 @@ def run_optimization():
             print("WARNING: failed to print final trajectory summary.", flush=True)
 
         if plot_final:
-            plot_trajectory_3d(final_log, env_config.earth_radius_m)
+            plot_trajectory_3d(final_log, env_config.earth_radius_m, eval_index=final_traj_results.get("eval_index"))
         if animate_final:
             animate_trajectory(final_log, env_config.earth_radius_m)
 

@@ -19,7 +19,7 @@ def test_log_iteration_writes_row(tmp_path, monkeypatch):
     monkeypatch.setattr(generate_logs, "LOG_FILENAME", str(log_file))
 
     # minimal params and results
-    params = np.arange(35, dtype=float)
+    params = np.arange(37, dtype=float)
     # We need to create an OptimizationParams object for log_iteration
     from Analysis.config import OptimizationParams
     params_obj = OptimizationParams(*params)

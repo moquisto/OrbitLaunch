@@ -287,8 +287,43 @@ def configure_software_for_optimization(
     pitch_points_upper = [
         [opt_params.upper_pitch_time_0, opt_params.upper_pitch_angle_0],
         [opt_params.upper_pitch_time_1, opt_params.upper_pitch_angle_1],
-        [opt_params.upper_pitch_time_2, opt_params.upper_pitch_angle_2]
+        [opt_params.upper_pitch_time_2, opt_params.upper_pitch_angle_2],
+        [opt_params.upper_pitch_time_3, opt_params.upper_pitch_angle_3],
     ]
+
+    def _enforce_monotonic_schedule(points: list[list[float]], *, min_dt_s: float = 1e-3) -> list[list[float]]:
+        """Make schedules deterministic by enforcing increasing times and decreasing pitch angles.
+
+        CMA-ES (and DE) converge much better when the mapping from parameters to
+        schedules is single-valued. If time points can swap order, multiple
+        parameter vectors represent the same schedule (permutation symmetry),
+        and the induced sort operation creates a discontinuous objective.
+        """
+        if not points:
+            return points
+
+        # Enforce strictly increasing times without reordering.
+        t_prev = float(points[0][0])
+        for i in range(1, len(points)):
+            t_i = float(points[i][0])
+            if t_i <= t_prev:
+                t_i = t_prev + float(min_dt_s)
+                points[i][0] = t_i
+            t_prev = t_i
+
+        # Enforce a typical gravity-turn shape: pitch decreases toward horizontal.
+        a_prev = float(points[0][1])
+        for i in range(1, len(points)):
+            a_i = float(points[i][1])
+            if a_i > a_prev:
+                a_i = a_prev
+                points[i][1] = a_i
+            a_prev = a_i
+
+        return points
+
+    pitch_points_booster = _enforce_monotonic_schedule(pitch_points_booster)
+    pitch_points_upper = _enforce_monotonic_schedule(pitch_points_upper)
 
     # Throttle program (upper stage)
     upper_throttle_levels = np.array([

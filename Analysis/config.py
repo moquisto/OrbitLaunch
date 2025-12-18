@@ -9,7 +9,10 @@ from typing import List, Tuple, Optional
 
 @dataclass
 class OptimizationParams:
-    """A structured container for the 35 parameters being optimized."""
+    """A structured container for the optimization parameters.
+
+    Note: Keep field order stable to avoid invalidating optimizer seeds and logs.
+    """
     meco_mach: float
     booster_pitch_time_0: float
     booster_pitch_angle_0: float
@@ -45,6 +48,9 @@ class OptimizationParams:
     booster_throttle_switch_ratio_0: float
     booster_throttle_switch_ratio_1: float
     booster_throttle_switch_ratio_2: float
+    # Additional late-burn upper-stage pitch point (for improved circularization authority)
+    upper_pitch_time_3: float
+    upper_pitch_angle_3: float
 
 
 @dataclass
@@ -85,7 +91,9 @@ class AnalysisConfig:
         1.0,   # booster_throttle_level_3
         0.1,   # booster_throttle_switch_ratio_0
         0.5,   # booster_throttle_switch_ratio_1
-        0.9    # booster_throttle_switch_ratio_2
+        0.9,   # booster_throttle_switch_ratio_2
+        340.0, # upper_pitch_time_3 (s) - late-burn shaping
+        0.0,   # upper_pitch_angle_3 (deg)
     ])
 
 @dataclass
@@ -96,7 +104,7 @@ class OptimizationBounds:
     @staticmethod
     def get_bounds() -> List[Tuple[float, float]]:
         """
-        Returns the hardcoded bounds for the 35 optimization parameters.
+        Returns the hardcoded bounds for the optimization parameters.
         """
         return [
             (4.5, 6.5),      # 0: MECO Mach
@@ -139,4 +147,7 @@ class OptimizationBounds:
             (0.05, 0.4),     # 32: booster_throttle_switch_ratio_0 (0-1, fraction of booster burn duration)
             (0.25, 0.8),     # 33: booster_throttle_switch_ratio_1 (0-1, fraction of booster burn duration)
             (0.6, 0.95),     # 34: booster_throttle_switch_ratio_2 (0-1, fraction of booster burn duration)
+            # Extra late upper-stage pitch point (time from upper ignition, deg from horizontal)
+            (200.0, 1500.0),  # 35: upper_pitch_time_3 (s)
+            (0.0, 15.0),     # 36: upper_pitch_angle_3 (deg)
         ]

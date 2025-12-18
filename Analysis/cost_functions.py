@@ -16,6 +16,10 @@ TARGET_TOLERANCE_M = 10_000.0
 
 # When in phase 2, orbit accuracy must dominate fuel until within tolerance.
 ORBIT_ERROR_WEIGHT = 200.0  # [kg per meter] in the penalty term
+# When outside the tolerance band, discourage solutions that "nail" only one
+# axis (e.g. perfect apoapsis but poor perigee) since the requirement is that
+# both perigee and apoapsis be within tolerance.
+ORBIT_BALANCE_WEIGHT = 50.0  # [kg per meter]
 # Even within the tolerance band, prefer being closer to the exact target
 # altitude (otherwise the minimum-fuel solution tends to sit on the lowest
 # acceptable orbit).
@@ -161,11 +165,15 @@ def calculate_cost(
         # exact target altitude, not just the edge of the tolerance band.
         cost = fuel_used + orbit_shape_error * ORBIT_ERROR_WEIGHT_IN_TOL
 
-        # Outside the tolerance band, orbit accuracy must dominate fuel. Use the
-        # combined error relative to the ±tolerance band on both axes.
+        # Outside the tolerance band, orbit accuracy must dominate fuel.
+        #
+        # Penalize the worst-axis error (requirement is both perigee and apoapsis
+        # within tolerance) and add a balance term so the optimizer doesn't spend
+        # effort perfecting one axis while leaving the other far off.
         if orbital_error > TARGET_TOLERANCE_M:
-            shape_excess = max(0.0, orbit_shape_error - 2.0 * TARGET_TOLERANCE_M)
-            cost += shape_excess * ORBIT_ERROR_WEIGHT
+            worst_excess = float(max(0.0, orbital_error - TARGET_TOLERANCE_M))
+            cost += worst_excess * ORBIT_ERROR_WEIGHT
+            cost += abs(perigee_error - apoapsis_error) * ORBIT_BALANCE_WEIGHT
 
         return float(cost)
 
@@ -284,6 +292,13 @@ def evaluate_simulation_results(
     v_norm = float(np.linalg.norm(v))
     r_hat = r / r_norm if r_norm > 0.0 else np.array([0.0, 0.0, 1.0], dtype=float)
     vr = float(np.dot(v, r_hat)) if r_norm > 0.0 else 0.0
+    v_horizontal = float(np.sqrt(max(0.0, v_norm * v_norm - vr * vr)))
+    fpa_deg = float(np.degrees(np.arctan2(vr, v_horizontal))) if (v_horizontal > 0.0 or vr != 0.0) else 0.0
+
+    results["eval_altitude_m"] = float(r_norm - float(cfg_env.earth_radius_m))
+    results["eval_speed_mps"] = float(v_norm)
+    results["eval_vr_mps"] = float(vr)
+    results["eval_fpa_deg"] = float(fpa_deg)
 
     # Prefer the simulation's recorded specific energy if present, otherwise
     # compute it directly.

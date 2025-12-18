@@ -9,7 +9,7 @@ from matplotlib import animation
 from Main.telemetry import Logger
 
 
-def plot_trajectory_3d(log: Logger, r_earth: float):
+def plot_trajectory_3d(log: Logger, r_earth: float, *, eval_index: int | None = None):
     """Static 3D plot of trajectory around a spherical Earth."""
     positions = np.array(log.r)
     times = np.array(log.t_sim)
@@ -36,6 +36,9 @@ def plot_trajectory_3d(log: Logger, r_earth: float):
     else:
         ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], color="tab:red", label="Trajectory", lw=2)
     ax.scatter(positions[0, 0], positions[0, 1], positions[0, 2], color="green", s=30, label="Launch")
+    if eval_index is not None and 0 <= int(eval_index) < positions.shape[0]:
+        i = int(eval_index)
+        ax.scatter(positions[i, 0], positions[i, 1], positions[i, 2], color="tab:blue", s=30, label="Eval/Cutoff")
     ax.scatter(positions[-1, 0], positions[-1, 1], positions[-1, 2], color="black", s=30, label="Final")
 
     # Symmetric limits based on max radial distance
